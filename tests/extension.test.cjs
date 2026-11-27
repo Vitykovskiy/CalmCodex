@@ -13,6 +13,8 @@ const source = readFileSync(path.join(extensionPath, 'extension.cjs'), 'utf8');
 function harness(settings = {}, outcome = { text: 'Готовый текст.' }) {
   const commands = new Map();
   const calls = [];
+  const killedGroups = [];
+  const timers = [];
   const messages = [];
   const view = { async postMessage(message) { messages.push(message); } };
   const vscode = {
@@ -20,36 +22,55 @@ function harness(settings = {}, outcome = { text: 'Готовый текст.' }
     extensions: { getExtension() {} },
     workspace: { getConfiguration() { return { get(key, fallback) { return settings[key] ?? fallback; } }; } }
   };
-  function spawn(binary, args) {
-    const call = { binary, args: Array.from(args) };
+  function spawn(binary, args, options) {
+    const call = { binary, args: Array.from(args), options, pid: 100 + calls.length, active: true };
     calls.push(call);
     const child = new EventEmitter();
+    child.pid = call.pid;
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.stdin = new EventEmitter();
-    child.stdin.end = text => {
-      call.input = text;
+    const abort = () => {
+      if (!call.active) return;
+      call.active = false;
+      call.aborted = true;
+      child.emit('error', new Error('The operation was aborted'));
+    };
+    options.signal?.addEventListener('abort', abort, { once: true });
+    call.finish = result => {
       queueMicrotask(() => {
-        if (outcome.error) child.emit('error', new Error(outcome.error));
+        if (!call.active) return;
+        call.active = false;
+        options.signal?.removeEventListener('abort', abort);
+        if (result.error) child.emit('error', new Error(result.error));
         else {
-          if (outcome.text) child.stdout.emit('data', Buffer.from(outcome.text));
-          if (outcome.diagnostic) child.stderr.emit('data', Buffer.from(outcome.diagnostic));
-          child.emit('close', outcome.code ?? 0);
+          if (result.text) child.stdout.emit('data', Buffer.from(result.text));
+          if (result.diagnostic) child.stderr.emit('data', Buffer.from(result.diagnostic));
+          child.emit('close', result.code ?? 0);
         }
       });
+    };
+    child.stdin.end = text => {
+      call.input = text;
+      const result = typeof outcome === 'function' ? outcome(call) : outcome;
+      if (result) call.finish(result);
     };
     return child;
   }
   const module = { exports: {} };
-  vm.runInNewContext(source, {
-    module, __dirname: extensionPath, Buffer, WeakRef, process: { platform: 'linux' },
+  const scope = {
+    module, __dirname: extensionPath, Buffer, WeakRef, AbortController,
+    process: { platform: 'linux', kill(pid, signal) { killedGroups.push({ pid, signal }); } },
+    setTimeout(callback, delay) { const timer = { callback, delay, active: true }; timers.push(timer); return timer; },
+    clearTimeout(timer) { timer.active = false; },
     require(name) {
       if (name === 'vscode') return vscode;
       if (name === 'node:child_process') return { spawn };
       if (name === './install-adapter.cjs') return { install() { assert.fail('Unexpected adapter installation'); } };
       throw new Error('Unexpected dependency: ' + name);
     }
-  }, { filename: 'extension.cjs' });
+  };
+  vm.runInNewContext(source, scope, { filename: 'extension.cjs' });
   const api = module.exports.activate({
     subscriptions: [],
     asAbsolutePath(relative) { return path.join(extensionPath, relative); }
@@ -58,7 +79,7 @@ function harness(settings = {}, outcome = { text: 'Готовый текст.' }
     await api.receive(view, { kind: 'rewrite', id: 'request', text: 'Исходный черновик.', auto: true, ...options });
     return messages.at(-1);
   }
-  return { api, calls, commands, messages, receive, view };
+  return { api, calls, commands, messages, receive, view, killedGroups, timers, rewrite: scope.rewrite };
 }
 
 test('automatic processing defaults to the existing rewrite mode', async () => {
@@ -135,5 +156,99 @@ test('engine failures return an error without replacement text in prompt mode', 
     const reply = await h.receive();
     assert.equal(reply.error, outcome.diagnostic || outcome.error);
     assert.equal(reply.text, undefined);
+  }
+});
+
+test('prompt mode processes editor regions in isolation and preserves their result order', async () => {
+  const parts = ['Импорт падает. Вот пример:', 'Поправь чтение. CSV не меняй.'];
+  const h = harness({ mode: 'prompt' }, call => ({ text: call.input.replace('Поправь', 'Исправь') }));
+  const reply = await h.receive({ text: parts.join('\n`CC-boundary`\n'), parts });
+  assert.equal(reply.mode, 'prompt');
+  assert.equal(reply.text, undefined);
+  assert.deepEqual(Array.from(reply.parts), [parts[0], 'Исправь чтение. CSV не меняй.']);
+  assert.deepEqual(h.calls.map(call => call.input), parts);
+  for (const call of h.calls) {
+    assert.equal(call.options.detached, true);
+    assert.ok(call.options.signal);
+    assert.doesNotMatch(call.input, /CC-boundary/);
+  }
+});
+
+test('rewrite mode retains a single call for a structured editor document', async () => {
+  const h = harness({ mode: 'rewrite' });
+  const source = 'До\n`CC-boundary`\nПосле';
+  const reply = await h.receive({ text: source, parts: ['До', 'После'] });
+  assert.equal(reply.mode, 'rewrite');
+  assert.equal(reply.parts, undefined);
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.calls[0].input, source);
+  assert.equal(h.calls[0].options.signal, undefined);
+  assert.equal(h.calls[0].options.detached, undefined);
+});
+
+test('prompt batches run at most three processes and map out-of-order completions', async () => {
+  const h = harness({ mode: 'prompt' }, null);
+  const parts = ['one', 'two', 'three', 'four', 'five'];
+  const pending = h.receive({ parts });
+  assert.equal(h.calls.length, 3);
+  h.calls[1].finish({ text: 'TWO' });
+  await new Promise(setImmediate);
+  assert.equal(h.calls.length, 4);
+  assert.equal(h.calls.filter(call => call.active).length, 3);
+  h.calls[3].finish({ text: 'FOUR' });
+  await new Promise(setImmediate);
+  assert.equal(h.calls.length, 5);
+  assert.equal(h.calls.filter(call => call.active).length, 3);
+  for (const call of h.calls.filter(call => call.active)) call.finish({ text: call.input.toUpperCase() });
+  const reply = await pending;
+  assert.deepEqual(Array.from(reply.parts), parts.map(part => part.toUpperCase()));
+  assert.ok(h.timers.every(timer => !timer.active));
+});
+
+test('one failed region cancels active process groups and stops the remaining queue', async () => {
+  const h = harness({ mode: 'prompt' }, null);
+  const pending = h.receive({ parts: ['one', 'two', 'three', 'four', 'five'] });
+  h.calls[0].finish({ code: 1, diagnostic: 'Ошибка первой части.' });
+  const reply = await pending;
+  assert.equal(reply.error, 'Ошибка первой части.');
+  assert.equal(reply.parts, undefined);
+  assert.equal(h.calls.length, 3);
+  assert.ok(h.calls[1].aborted && h.calls[2].aborted);
+  assert.deepEqual(h.killedGroups.map(call => call.pid), [-101, -102]);
+  assert.ok(h.killedGroups.every(call => call.signal === 'SIGTERM'));
+  assert.ok(h.timers.every(timer => !timer.active));
+});
+
+test('the shared batch deadline cancels all active groups before the composer timeout', async () => {
+  const h = harness({ mode: 'prompt' }, null);
+  const pending = h.receive({ parts: ['one', 'two', 'three', 'four'] });
+  assert.equal(h.timers.length, 1);
+  assert.equal(h.timers[0].delay, 70000);
+  h.timers[0].callback();
+  const reply = await pending;
+  assert.match(reply.error, /не успела/);
+  assert.equal(reply.parts, undefined);
+  assert.equal(h.calls.length, 3);
+  assert.deepEqual(h.killedGroups.map(call => call.pid), [-100, -101, -102]);
+});
+
+test('an aborted signal never starts a process and a late abort never kills a completed group', async () => {
+  const h = harness({}, { text: 'Готово.' });
+  const early = new AbortController();
+  early.abort(new Error('Остановлено до запуска.'));
+  await assert.rejects(h.rewrite('/engine', 'Текст', 'prompt', early.signal), /до запуска/);
+  assert.equal(h.calls.length, 0);
+  const late = new AbortController();
+  assert.equal(await h.rewrite('/engine', 'Текст', 'prompt', late.signal), 'Готово.');
+  late.abort(new Error('Поздняя отмена.'));
+  assert.equal(h.killedGroups.length, 0);
+});
+
+test('malformed editor parts are rejected before starting the engine', async () => {
+  for (const parts of [[], ['one'], ['one', ''], ['one', 2], 'one']) {
+    const h = harness({ mode: 'prompt' });
+    const reply = await h.receive({ parts });
+    assert.match(reply.error, /фрагменты/);
+    assert.equal(h.calls.length, 0);
   }
 });

@@ -47,6 +47,7 @@ function replyWith(handler) {
       event.origin = win.location.origin;
       event.data = {
         type: 'calmcodex/result', id: message.id,
+        mode: message.mode ?? 'rewrite',
         ...(typeof result === 'string' ? { text: result } : result)
       };
       win.dispatchEvent(event);
@@ -114,6 +115,99 @@ test('plain dictation uses the same rewrite for display and history', async () =
   }, () => true);
   assert.equal(result.promptRawOverride, 'Почему 403?');
   assert.equal(result.persistedPromptRawOverride, 'Почему 403?');
+});
+
+test('prompt regions keep the example caption and attachment before the following requirements', async () => {
+  const caption = 'Импорт падает на пустых строках. Вот пример:';
+  const request = 'Поправь чтение. CSV на входе не переделывай, лог оставь прежним';
+  const calls = [];
+  replyWith((raw, message) => {
+    calls.push(message);
+    assert.deepEqual(message.parts, [caption, request]);
+    return { mode: 'prompt', parts: [caption, 'Исправь чтение. CSV на входе не меняй, лог сохрани.'] };
+  });
+  const image = schema.nodes.image.create({ src: 'file:///test/example.png' });
+  const submitted = doc(paragraph(text(caption), image), paragraph(text(request)));
+  const controller = editor(doc(paragraph(text('Живой черновик'))));
+  const live = controller.view.state.doc;
+  const result = await prepare(controller, {
+    submittedDocument: submitted, promptRawOverride: controller.getText(submitted), submittedDocumentFormat: 'markdown'
+  }, () => true);
+  assert.ok(result);
+  assert.equal(result.submittedDocument.child(0).textContent, caption);
+  assert.equal(result.submittedDocument.child(0).lastChild, image);
+  assert.equal(result.submittedDocument.child(1).textContent, 'Исправь чтение. CSV на входе не меняй, лог сохрани.');
+  assert.equal(result.promptRawOverride, result.persistedPromptRawOverride);
+  assert.equal(controller.view.state.doc, live);
+  assert.equal(calls.length, 1);
+});
+
+test('a flattened prompt answer with its boundary moved to the end preserves the whole draft', async () => {
+  replyWith((raw, message) => {
+    const marker = raw.match(/`CC-[^`]+`/u)?.[0];
+    assert.ok(marker);
+    return { mode: 'prompt', text: message.parts.join(' ') + '\n' + marker + '\n' };
+  });
+  const image = schema.nodes.image.create({ src: 'file:///test/example.png' });
+  const original = doc(
+    paragraph(text('Импорт падает на пустых строках. Вот пример:'), image),
+    paragraph(text('Поправь чтение. CSV на входе не переделывай, лог оставь прежним'))
+  );
+  const controller = editor(original);
+  assert.equal(await prepare(controller, {}, () => true), null);
+  assert.equal(controller.view.state.doc, original);
+});
+
+test('a structured prompt requires a validated mode and a complete region array', async () => {
+  const original = doc(paragraph(text('Подпись.')), paragraph(text('Требование.')));
+  for (const reply of [
+    { mode: undefined, text: 'Слитый текст.' },
+    { mode: 'prompt', parts: ['Одна часть.'] },
+    { mode: 'prompt', parts: ['Подпись.', ''] },
+    { mode: 'prompt', parts: ['Подпись.', 2] }
+  ]) {
+    replyWith(() => reply);
+    const controller = editor(original);
+    assert.equal(await prepare(controller, {}, () => true), null);
+    assert.equal(controller.view.state.doc, original);
+  }
+});
+
+test('one failed prompt region leaves all editor ranges unchanged', async () => {
+  replyWith(() => ({ mode: 'prompt', error: 'Ошибка второй части.' }));
+  const original = doc(paragraph(text('Подпись.')), paragraph(text('Требование.')));
+  const controller = editor(original);
+  assert.equal(await prepare(controller, {}, () => true), null);
+  assert.equal(controller.view.state.doc, original);
+});
+
+test('an edit while isolated prompt regions are pending survives their result', async () => {
+  let finish;
+  replyWith(() => new Promise(resolve => { finish = resolve; }));
+  const controller = editor(doc(paragraph(text('Подпись.')), paragraph(text('Требование.'))));
+  const pending = prepare(controller, {}, () => true);
+  controller.view.dispatch(controller.view.state.tr.insertText('Уточнение. ', 1));
+  const edited = controller.view.state.doc;
+  finish({ mode: 'prompt', parts: ['Другая подпись.', 'Другое требование.'] });
+  assert.equal(await pending, null);
+  assert.equal(controller.view.state.doc, edited);
+});
+
+test('a full isolated prompt preview keeps the attachment and submits without another rewrite', async () => {
+  let calls = 0;
+  replyWith((raw, message) => {
+    calls++;
+    assert.equal(message.mode, 'prompt');
+    return { mode: 'prompt', parts: ['Пример:', 'Исправь чтение.'] };
+  });
+  const image = schema.nodes.image.create({ src: 'file:///test/example.png' });
+  const controller = editor(doc(paragraph(text('Вот пример:'), image), paragraph(text('Поправь чтение.'))));
+  requestPreview(controller, 'prompt');
+  const options = {};
+  assert.equal(await prepare(controller, options, () => true), options);
+  assert.equal(calls, 1);
+  assert.equal(controller.view.state.doc.child(0).lastChild, image);
+  assert.equal(controller.view.state.doc.child(1).textContent, 'Исправь чтение.');
 });
 
 test('a duplicate submit is ignored and a later edit survives the pending result', async () => {

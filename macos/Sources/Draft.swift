@@ -74,10 +74,16 @@ struct ProtectedDraft {
         let standaloneLines = masked.components(separatedBy: .newlines).filter {
             tokenSet.contains($0.trimmingCharacters(in: .whitespaces))
         }
-        // Added indentation can turn a fenced block into literal code text.
-        let outputLines = Set(text.components(separatedBy: .newlines))
-        guard standaloneLines.allSatisfy({ outputLines.contains($0) }) else {
-            throw DraftError("Luna изменила строки буквального фрагмента. Выделенный текст сохранён.")
+        let outputLines = text.components(separatedBy: .newlines)
+        for sourceLine in standaloneLines {
+            let token = sourceLine.trimmingCharacters(in: .whitespaces)
+            guard let outputLine = outputLines.first(where: {
+                $0.trimmingCharacters(in: .whitespaces) == token
+            }) else {
+                throw DraftError("Luna изменила строки буквального фрагмента. Выделенный текст сохранён.")
+            }
+            // Restore horizontal whitespace ourselves: model-added indentation can change Markdown.
+            text = text.replacingOccurrences(of: outputLine, with: sourceLine)
         }
         for (token, literal) in zip(tokens, literals) {
             text = text.replacingOccurrences(of: token, with: literal)

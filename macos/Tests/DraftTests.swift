@@ -16,9 +16,7 @@ struct DraftTests {
             "", "⟦K1⟧", draft.masked + "⟦K1⟧", draft.masked + "⟦K5⟧",
             "Сохрани ⟦K2⟧, ⟦K1⟧ и ⟦K3⟧.\n⟦K4⟧",
             "Сохрани ⟦K1⟧, ⟦K2⟧ и ⟦K3⟧. ⟦K4⟧",
-            "Сохрани ⟦K1⟧, ⟦K2⟧ и ⟦K3⟧.\n⟦K4⟧.",
-            "Сохрани ⟦K1⟧, ⟦K2⟧ и ⟦K3⟧.\n    ⟦K4⟧",
-            "Сохрани ⟦K1⟧, ⟦K2⟧ и ⟦K3⟧.\n\t⟦K4⟧"
+            "Сохрани ⟦K1⟧, ⟦K2⟧ и ⟦K3⟧.\n⟦K4⟧."
         ] {
             do { _ = try draft.restore(invalid); fatalError("Accepted an invalid rewrite") }
             catch is DraftError {}
@@ -33,8 +31,13 @@ struct DraftTests {
         let corrected = try correction.restore("Открой ⟦K1⟧. Нет, только ⟦K2⟧.")
         precondition(corrected == correction.original)
 
-        let windowsLines = try ProtectedDraft("Покажи:\r\n«HTTP 429»\r\nЗатем объясни.")
-        precondition(windowsLines.masked == "Покажи:\r\n⟦K1⟧\r\nЗатем объясни.")
+        for changedWhitespace in ["    ⟦K4⟧", "\t⟦K4⟧", "  ⟦K4⟧  \t"] {
+            let repaired = try draft.restore("Сохрани ⟦K1⟧, ⟦K2⟧ и ⟦K3⟧.\n\(changedWhitespace)")
+            precondition(repaired == restored)
+        }
+
+        let windowsLines = try ProtectedDraft("Покажи:\r\n  «HTTP 429»   \r\nЗатем объясни.")
+        precondition(windowsLines.masked == "Покажи:\r\n  ⟦K1⟧   \r\nЗатем объясни.")
         let windowsRestored = try windowsLines.restore("Покажи:\r\n⟦K1⟧\r\nЗатем объясни.")
         precondition(windowsRestored == windowsLines.original)
         do {
@@ -42,13 +45,23 @@ struct DraftTests {
             fatalError("Accepted a merged standalone literal")
         } catch is DraftError {}
 
-        let indented = try ProtectedDraft("Покажи:\n  «HTTP 429»\nЗатем объясни.")
-        let indentedRestored = try indented.restore("Покажи:\n  ⟦K1⟧\nЗатем объясни.")
-        precondition(indentedRestored == indented.original)
-        do {
-            _ = try indented.restore("Покажи:\n⟦K1⟧\nЗатем объясни.")
-            fatalError("Accepted a changed standalone indentation")
-        } catch is DraftError {}
+        let spacedRaw = "Блин, найди причину ошибки.\n  \(tick)error.log\(tick)   \nТолько объясни, ничего не меняй."
+        let spaced = try ProtectedDraft(spacedRaw)
+        let expectedSpaced = spacedRaw.replacingOccurrences(of: "Блин, найди", with: "Найди")
+        for outputLine in ["⟦K1⟧", "  ⟦K1⟧   ", "\t    ⟦K1⟧\t"] {
+            let repaired = try spaced.restore("Найди причину ошибки.\n\(outputLine)\nТолько объясни, ничего не меняй.")
+            precondition(repaired == expectedSpaced)
+        }
+        for outputLine in ["Ошибка: ⟦K1⟧", "⟦K1⟧."] {
+            do {
+                _ = try spaced.restore("Найди причину ошибки.\n\(outputLine)\nТолько объясни, ничего не меняй.")
+                fatalError("Accepted text joined to a standalone literal")
+            } catch is DraftError {}
+        }
+
+        let edgeWhitespace = try ProtectedDraft(" \t\(tick)first.log\(tick)   \nТолько объясни.\n  \(tick)last.log\(tick) \t\n")
+        let edgeRestored = try edgeWhitespace.restore("⟦K1⟧\nТолько объясни.\n⟦K2⟧")
+        precondition(edgeRestored == edgeWhitespace.original)
         print("Draft tests passed")
     }
 }

@@ -9,7 +9,7 @@ let pointerSelection;
 
 export function connect(send) { post = send; }
 
-function request(text, auto, mode) {
+function request(text, auto, mode, parts) {
   const id = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -19,11 +19,19 @@ function request(text, auto, mode) {
     pending.set(id, msg => {
       clearTimeout(timer);
       if (msg.error) reject(new Error(msg.error));
-      else if (msg.bypass || typeof msg.text === 'string') resolve(msg);
+      else if (msg.bypass) resolve(msg);
+      else if (parts && (msg.mode !== 'rewrite' && msg.mode !== 'prompt' || mode && msg.mode !== mode)) {
+        reject(new Error('Не удалось проверить режим обработки. Черновик сохранён.'));
+      } else if (parts && msg.mode === 'prompt') {
+        if (msg.text !== undefined || !Array.isArray(msg.parts) || msg.parts.length !== parts.length ||
+            !msg.parts.every(part => typeof part === 'string' && part.trim())) {
+          reject(new Error('Luna изменила границы фрагментов. Черновик сохранён.'));
+        } else resolve(msg);
+      } else if (typeof msg.text === 'string') resolve(msg);
       else reject(new Error('Не удалось получить текст от Luna.'));
     });
     try { post({ type: 'calmcodex/request', kind: 'rewrite', id, text, auto,
-      ...(mode === undefined ? {} : { mode }) }); }
+      ...(mode === undefined ? {} : { mode }), ...(parts ? { parts } : {}) }); }
     catch (error) { pending.delete(id); clearTimeout(timer); reject(error); }
   });
 }
@@ -121,23 +129,29 @@ function plan(doc, from, to) {
   });
   const source = runs.map((run,index)=>(separators[index - 1] || '') + run.text).join('');
   function replacement(tr, answer) {
-    const segments = [];
-    let remaining = answer;
-    for (const separator of separators) {
-      const marker = separator.trim();
-      const at = remaining.indexOf(marker);
-      if (at === -1 || remaining.indexOf(marker, at+marker.length) !== -1) {
-        throw new Error('Luna изменила границы форматирования. Черновик сохранён.');
+    const segments = Array.isArray(answer) ? answer : [];
+    if (Array.isArray(answer)) {
+      if (answer.length !== runs.length || !answer.every(part => typeof part === 'string' && part.trim())) {
+        throw new Error('Luna изменила границы фрагментов. Черновик сохранён.');
       }
-      let before = remaining.slice(0, at);
-      remaining = remaining.slice(at + marker.length);
-      if (separator.startsWith('\n')) {
-        before = before.replace(/\r?\n$/, '');
-        remaining = remaining.replace(/^\r?\n/, '');
+    } else {
+      let remaining = answer;
+      for (const separator of separators) {
+        const marker = separator.trim();
+        const at = remaining.indexOf(marker);
+        if (at === -1 || remaining.indexOf(marker, at+marker.length) !== -1) {
+          throw new Error('Luna изменила границы форматирования. Черновик сохранён.');
+        }
+        let before = remaining.slice(0, at);
+        remaining = remaining.slice(at + marker.length);
+        if (separator.startsWith('\n')) {
+          before = before.replace(/\r?\n$/, '');
+          remaining = remaining.replace(/^\r?\n/, '');
+        }
+        segments.push(before);
       }
-      segments.push(before);
+      segments.push(remaining);
     }
-    segments.push(remaining);
     const schema = doc.type.schema;
     const hardBreak = schema.nodes.hard_break || schema.nodes.hardBreak || schema.nodes.hardbreak;
     for (let i = runs.length - 1; i >= 0; --i) {
@@ -152,7 +166,7 @@ function plan(doc, from, to) {
     }
     return tr;
   }
-  return { source, replacement };
+  return { source, parts: runs.length > 1 ? runs.map(run => run.text) : undefined, replacement };
 }
 
 function ensureCurrent(slot, doc, revision, stillHere, action) {
@@ -170,10 +184,11 @@ async function preview({ slot, doc, selection, mode }) {
     const edit = plan(doc, whole ? 0 : selection.from, whole ? doc.content.size : selection.to);
     if (!edit.source.trim()) return true;
     status(slot, mode === 'prompt' ? 'Готовлю промпт…' : 'Переформулирую…');
-    const result = await request(edit.source, false, mode);
+    const result = await request(edit.source, false, mode, edit.parts);
     ensureCurrent(slot, doc, revision, () => true, 'Черновик изменился. Ваша правка сохранена.');
     if (!result.bypass) {
-      const tr = edit.replacement(slot.view.state.tr, result.text);
+      const tr = edit.replacement(slot.view.state.tr,
+        edit.parts && result.mode === 'prompt' ? result.parts : result.text);
       if (tr.docChanged) slot.view.dispatch(tr);
       if (whole) slot.cleaned = slot.view.state.doc;
     }
@@ -209,7 +224,7 @@ export async function prepare(controller, options, stillHere) {
     const source = edit ? edit.source : raw;
     if (!source.trim()) return options;
     status(slot, 'Переформулирую…');
-    const answer = await request(source, true);
+    const answer = await request(source, true, undefined, edit?.parts);
     ensureCurrent(slot, live, revision, stillHere, 'Черновик изменился. Отправка отменена.');
     status(slot, '');
     if (answer.bypass || answer.text === source) return options;
@@ -219,13 +234,15 @@ export async function prepare(controller, options, stillHere) {
     }
     if (frozen) {
       const state = view.state.constructor.create({ schema: doc.type.schema, doc });
-      const updated = edit.replacement(state.tr, answer.text).doc;
+      const updated = edit.replacement(state.tr,
+        edit.parts && answer.mode === 'prompt' ? answer.parts : answer.text).doc;
       const format = options.submittedDocumentFormat;
       return { ...options, submittedDocument: updated,
         promptRawOverride: controller.getText(updated, { format }),
         persistedPromptRawOverride: controller.getPersistedText(updated, { format }) };
     }
-    const tr = edit.replacement(view.state.tr, answer.text);
+    const tr = edit.replacement(view.state.tr,
+      edit.parts && answer.mode === 'prompt' ? answer.parts : answer.text);
     if (tr.docChanged) view.dispatch(tr);
     slot.cleaned = view.state.doc;
     return options;
