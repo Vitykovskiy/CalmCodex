@@ -3,7 +3,7 @@
   "displayName": "CalmCodex",
   "publisher": "local-calmcodex",
   "description": "Спокойная формулировка при отправке и в контекстном меню поля Codex.",
-  "version": "2.0.1",
+  "version": "2.1.0",
   "engines": {
     "vscode": "^1.96.2"
   },
