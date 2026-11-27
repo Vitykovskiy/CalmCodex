@@ -9,8 +9,9 @@ import { EditorState } from 'prosemirror-state';
 // The composer uses the VS Code webview message API. Tests supply its reply channel.
 const win = globalThis.window = new EventTarget();
 win.location = { origin: 'test://editor' };
+const documentListeners = new Map();
 globalThis.document = {
-  addEventListener() {},
+  addEventListener(type, handler) { documentListeners.set(type, handler); },
   createElement() { return { isConnected: true, style: {}, setAttribute() {} }; }
 };
 const { bind, connect, prepare } = await import('../extension/composer.mjs');
@@ -19,8 +20,13 @@ const text = (value, marks) => schema.text(value, marks);
 const doc = (...nodes) => schema.node('doc', null, nodes);
 
 function editor(document) {
+  const attributes = new Map();
   const view = {
-    dom: { isConnected: true, after() {}, addEventListener() {} },
+    dom: {
+      isConnected: true, after() {}, addEventListener() {},
+      getAttribute(name) { return attributes.get(name); },
+      setAttribute(name, value) { attributes.set(name, value); }
+    },
     state: EditorState.create({ doc: document }),
     dispatch(transaction) { this.state = this.state.apply(transaction); }
   };
@@ -36,7 +42,7 @@ function editor(document) {
 function replyWith(handler) {
   connect(message => {
     if (message.kind !== 'rewrite') return;
-    Promise.resolve(handler(message.text)).then(result => {
+    Promise.resolve(handler(message.text, message)).then(result => {
       const event = new Event('message');
       event.origin = win.location.origin;
       event.data = {
@@ -47,6 +53,43 @@ function replyWith(handler) {
     });
   });
 }
+
+function requestPreview(controller, mode) {
+  const dom = controller.view.dom;
+  documentListeners.get('contextmenu')({ target: { closest() { return dom; } } });
+  const { calmCodexField } = JSON.parse(dom.getAttribute('data-vscode-context'));
+  const event = new Event('message');
+  event.origin = win.location.origin;
+  event.data = { type: 'calmcodex/preview', key: calmCodexField, mode };
+  win.dispatchEvent(event);
+}
+
+test('a full prompt preview routes its mode and is submitted without another rewrite', async () => {
+  const requests = [];
+  replyWith((raw, message) => {
+    requests.push(message);
+    return 'Исправь двойное сохранение. API сохрани.';
+  });
+  const controller = editor(doc(paragraph(text('Блин, сохранение дважды. Почини, API не трогай.'))));
+  requestPreview(controller, 'prompt');
+  const options = {};
+  assert.equal(await prepare(controller, options, () => true), options);
+  assert.equal(controller.getText(), 'Исправь двойное сохранение. API сохрани.');
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].auto, false);
+  assert.equal(requests[0].mode, 'prompt');
+});
+
+test('a failed prompt preview preserves the draft and cancels a pending submit', async () => {
+  let requests = 0;
+  replyWith(() => { requests++; return { error: 'Модель недоступна.' }; });
+  const original = 'Почему 403? Код не меняй.';
+  const controller = editor(doc(paragraph(text(original))));
+  requestPreview(controller, 'prompt');
+  assert.equal(await prepare(controller, {}, () => true), null);
+  assert.equal(controller.getText(), original);
+  assert.equal(requests, 1);
+});
 
 test('final dictation preserves code marks, an inline attachment and the live editor', async () => {
   replyWith(raw => raw.replace('Блин, верни', 'Верни'));

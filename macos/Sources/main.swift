@@ -29,7 +29,8 @@ final class ServiceProvider: NSObject {
             guard let source = board.string(forType: .string) else {
                 throw DraftError("Выделите текст в поле ввода.")
             }
-            let result = try Rewriter().rewrite(source)
+            let mode = try ProcessingMode(argument: userData ?? "rewrite")
+            let result = try Rewriter().rewrite(source, mode: mode)
             // The Services pasteboard belongs to this invocation; the general clipboard stays intact.
             board.clearContents()
             guard board.setString(result, forType: .string) else {
@@ -48,13 +49,15 @@ if CommandLine.arguments.dropFirst() == ["--register-shortcut"] {
         FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8))
         exit(EXIT_FAILURE)
     }
-} else if CommandLine.arguments.dropFirst() == ["--stdin"] {
+// AppKit may supply its own launch arguments; our CLI uses long options.
+} else if CommandLine.arguments.dropFirst().contains(where: { $0.hasPrefix("--") }) {
     do {
+        let mode = try ProcessingMode.fromCommandLine(Array(CommandLine.arguments.dropFirst()))
         let data = FileHandle.standardInput.readDataToEndOfFile()
         guard let input = String(data: data, encoding: .utf8) else {
             throw DraftError("Нужен текст в кодировке UTF-8.")
         }
-        let output = try Rewriter().rewrite(input)
+        let output = try Rewriter().rewrite(input, mode: mode)
         FileHandle.standardOutput.write(Data(output.utf8))
     } catch {
         FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8))

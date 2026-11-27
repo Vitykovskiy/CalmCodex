@@ -9,7 +9,7 @@ let pointerSelection;
 
 export function connect(send) { post = send; }
 
-function request(text, auto) {
+function request(text, auto, mode) {
   const id = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -22,7 +22,8 @@ function request(text, auto) {
       else if (msg.bypass || typeof msg.text === 'string') resolve(msg);
       else reject(new Error('Не удалось получить текст от Luna.'));
     });
-    try { post({ type: 'calmcodex/request', kind: 'rewrite', id, text, auto }); }
+    try { post({ type: 'calmcodex/request', kind: 'rewrite', id, text, auto,
+      ...(mode === undefined ? {} : { mode }) }); }
     catch (error) { pending.delete(id); clearTimeout(timer); reject(error); }
   });
 }
@@ -38,7 +39,7 @@ window.addEventListener('message', event => {
     const target = contextTarget;
     contextTarget = undefined;
     if (target.slot.busy) return;
-    const job = preview(target);
+    const job = preview({ ...target, mode: msg.mode ?? 'rewrite' });
     target.slot.previewDone = job;
     void job.finally(() => { if (target.slot.previewDone === job) target.slot.previewDone = undefined; });
   }
@@ -160,7 +161,7 @@ function ensureCurrent(slot, doc, revision, stillHere, action) {
   }
 }
 
-async function preview({ slot, doc, selection }) {
+async function preview({ slot, doc, selection, mode }) {
   if (slot.busy || slot.view.state.doc !== doc || !slot.view.dom.isConnected) return;
   const whole = selection.empty || (selection.from <= 1 && selection.to >= doc.content.size - 1);
   slot.busy = true;
@@ -168,8 +169,8 @@ async function preview({ slot, doc, selection }) {
   try {
     const edit = plan(doc, whole ? 0 : selection.from, whole ? doc.content.size : selection.to);
     if (!edit.source.trim()) return true;
-    status(slot, 'Переформулирую…');
-    const result = await request(edit.source, false);
+    status(slot, mode === 'prompt' ? 'Готовлю промпт…' : 'Переформулирую…');
+    const result = await request(edit.source, false, mode);
     ensureCurrent(slot, doc, revision, () => true, 'Черновик изменился. Ваша правка сохранена.');
     if (!result.bypass) {
       const tr = edit.replacement(slot.view.state.tr, result.text);

@@ -63,6 +63,22 @@ struct ProtectedDraft {
               text.components(separatedBy: prefix).count == tokens.count + 1 else {
             throw DraftError("Luna изменила буквальный фрагмент. Выделенный текст сохранён.")
         }
+        var cursor = text.startIndex
+        for token in tokens {
+            guard let range = text.range(of: token, range: cursor..<text.endIndex) else {
+                throw DraftError("Luna изменила порядок буквальных фрагментов. Выделенный текст сохранён.")
+            }
+            cursor = range.upperBound
+        }
+        let tokenSet = Set(tokens)
+        let standaloneLines = masked.components(separatedBy: .newlines).filter {
+            tokenSet.contains($0.trimmingCharacters(in: .whitespaces))
+        }
+        // Added indentation can turn a fenced block into literal code text.
+        let outputLines = Set(text.components(separatedBy: .newlines))
+        guard standaloneLines.allSatisfy({ outputLines.contains($0) }) else {
+            throw DraftError("Luna изменила строки буквального фрагмента. Выделенный текст сохранён.")
+        }
         for (token, literal) in zip(tokens, literals) {
             text = text.replacingOccurrences(of: token, with: literal)
         }

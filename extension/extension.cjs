@@ -4,9 +4,10 @@ const vscode = require('vscode');
 const { spawn } = require('node:child_process');
 const { install } = require('./install-adapter.cjs');
 
-function rewrite(binary, text) {
+function rewrite(binary, text, mode) {
   return new Promise((resolve, reject) => {
-    const child = spawn(binary, ['--stdin'], { stdio: ['pipe', 'pipe', 'pipe'] });
+    const args = mode === 'prompt' ? ['--stdin', '--mode', 'prompt'] : ['--stdin'];
+    const child = spawn(binary, args, { stdio: ['pipe', 'pipe', 'pipe'] });
     const output = [];
     const diagnostic = [];
     child.stdout.on('data', chunk => output.push(chunk));
@@ -26,10 +27,12 @@ function activate(context) {
   const views = new Map();
   const engine = context.asAbsolutePath('engine/CalmCodex.service/Contents/MacOS/CalmCodex');
 
-  context.subscriptions.push(vscode.commands.registerCommand('calmCodex.preview', async item => {
-    const view = views.get(item?.calmCodexView)?.deref();
-    if (view) await view.postMessage({ type: 'calmcodex/preview', key: item.calmCodexField });
-  }));
+  for (const [command, mode] of [['calmCodex.preview', 'rewrite'], ['calmCodex.optimize', 'prompt']]) {
+    context.subscriptions.push(vscode.commands.registerCommand(command, async item => {
+      const view = views.get(item?.calmCodexView)?.deref();
+      if (view) await view.postMessage({ type: 'calmcodex/preview', key: item.calmCodexField, mode });
+    }));
+  }
   // The adapter lives at the composer boundary, so native send, queue and dictation use it alike.
   const codex = vscode.extensions.getExtension('openai.chatgpt');
   if (codex && process.platform === 'darwin') {
@@ -54,8 +57,14 @@ function activate(context) {
       if (msg.kind !== 'rewrite' || typeof msg.id !== 'string' || typeof msg.text !== 'string') return;
       const reply = { type: 'calmcodex/result', id: msg.id };
       try {
-        if (msg.auto && !vscode.workspace.getConfiguration('calmCodex').get('rewriteOnSend', true)) reply.bypass = true;
-        else reply.text = await rewrite(engine, msg.text);
+        const config = vscode.workspace.getConfiguration('calmCodex');
+        if (msg.auto && !config.get('rewriteOnSend', true)) reply.bypass = true;
+        else {
+          // Automatic sends use the setting; a context command selects its own mode.
+          const mode = msg.auto ? config.get('mode', 'rewrite') : (msg.mode ?? 'rewrite');
+          if (mode !== 'rewrite' && mode !== 'prompt') throw new Error('Выберите режим обработки в настройках CalmCodex.');
+          reply.text = await rewrite(engine, msg.text, mode);
+        }
       } catch (err) { reply.error = err.message; }
       await view.postMessage(reply);
     }

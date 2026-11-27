@@ -5,7 +5,8 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "npm run test:composer && npm run test:macos",
+    "test": "npm run test:extension && npm run test:composer && npm run test:macos",
+    "test:extension": "node --test tests/extension.test.cjs",
     "test:composer": "node --test tests/composer.test.mjs",
     "test:macos": "zsh scripts/test-macos.zsh",
     "test:adapter": "node --test tests/installed-adapter.test.cjs",
