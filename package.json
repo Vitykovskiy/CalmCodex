@@ -1,0 +1,20 @@
+{
+  "name": "calmcodex-development",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "npm run test:composer && npm run test:macos",
+    "test:composer": "node --test tests/composer.test.mjs",
+    "test:macos": "zsh scripts/test-macos.zsh",
+    "test:adapter": "node --test tests/installed-adapter.test.cjs",
+    "test:live": "CALMCODEX_TEST_LIVE=1 node --test --test-name-pattern='installed Luna' tests/composer.test.mjs",
+    "build": "zsh scripts/package.zsh"
+  },
+  "devDependencies": {
+    "@vscode/vsce": "4.1.1",
+    "prosemirror-schema-basic": "1.2.5",
+    "prosemirror-state": "1.4.4"
+  }
+}
