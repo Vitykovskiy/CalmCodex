@@ -4,11 +4,15 @@ const vscode = require('vscode');
 const { spawn } = require('node:child_process');
 const { install } = require('./install-adapter.cjs');
 
-function rewrite(binary, text, mode, { signal, allowEmpty = false } = {}) {
+function rewrite(binary, text, mode, { signal, allowEmpty = false, context, model, reasoningEffort, ultracave } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(signal.reason); return; }
-    const args = mode === 'prompt' ? ['--stdin', '--mode', 'prompt'] : ['--stdin'];
+    const args = [context ? '--stdin-json' : '--stdin'];
+    if (mode === 'prompt') args.push('--mode', 'prompt');
     if (allowEmpty) args.push('--allow-empty');
+    if (model) args.push('--model', model);
+    if (reasoningEffort) args.push('--reasoning-effort', reasoningEffort);
+    if (ultracave !== undefined) args.push(ultracave ? '--ultracave' : '--no-ultracave');
     let child;
     // The native engine starts Codex too. Cancel its own process group, not only the wrapper.
     const cancelGroup = () => {
@@ -31,16 +35,16 @@ function rewrite(binary, text, mode, { signal, allowEmpty = false } = {}) {
       cleanup();
       const result = Buffer.concat(output).toString('utf8');
       if (code === 0 && (allowEmpty || result.trim())) resolve(result);
-      else reject(new Error(Buffer.concat(diagnostic).toString('utf8').trim() || 'Luna не вернула текст.'));
+      else reject(new Error(Buffer.concat(diagnostic).toString('utf8').trim() || 'Модель не вернула текст.'));
     });
-    child.stdin.end(text, 'utf8');
+    child.stdin.end(context ? JSON.stringify({ draft: text, context }) : text, 'utf8');
   });
 }
 
-async function rewriteParts(binary, parts, mode) {
+async function rewriteParts(binary, parts, mode, options) {
   const controller = new AbortController();
   const timer = setTimeout(() => {
-    controller.abort(new Error('Luna не успела обработать черновик. Текст сохранён.'));
+    controller.abort(new Error('Модель не успела обработать черновик. Текст сохранён.'));
   }, 70000);
   const result = new Array(parts.length);
   let next = 0;
@@ -48,7 +52,12 @@ async function rewriteParts(binary, parts, mode) {
     while (!controller.signal.aborted) {
       const index = next++;
       if (index >= parts.length) return;
-      try { result[index] = await rewrite(binary, parts[index], mode, { signal: controller.signal, allowEmpty: true }); }
+      try {
+        result[index] = await rewrite(binary, parts[index], mode, {
+          ...options, signal: controller.signal, allowEmpty: true,
+          context: { before: parts.slice(0, index), after: parts.slice(index + 1) }
+        });
+      }
       catch (error) {
         if (!controller.signal.aborted) controller.abort(error);
         return;
@@ -63,6 +72,22 @@ async function rewriteParts(binary, parts, mode) {
     }
     return result;
   } finally { clearTimeout(timer); }
+}
+
+function processingOptions(config) {
+  const rawModel = config.get('model', '');
+  const reasoningEffort = config.get('reasoningEffort', '');
+  const ultracave = config.get('ultracave', true);
+  if (typeof rawModel !== 'string' || (rawModel.trim() && !/^[a-z0-9][a-z0-9._:\/-]*$/i.test(rawModel.trim()))) {
+    throw new Error('Укажите идентификатор модели в настройке calmCodex.model.');
+  }
+  if (!['', 'low', 'medium', 'high', 'xhigh', 'max'].includes(reasoningEffort)) {
+    throw new Error('Выберите уровень рассуждений в настройке calmCodex.reasoningEffort.');
+  }
+  if (typeof ultracave !== 'boolean') {
+    throw new Error('Включите или отключите сжатие в настройке calmCodex.ultracave.');
+  }
+  return { model: rawModel.trim(), reasoningEffort, ultracave };
 }
 
 function activate(context) {
@@ -105,14 +130,15 @@ function activate(context) {
           // Automatic sends use the setting; a context command selects its own mode.
           const mode = msg.auto ? config.get('mode', 'rewrite') : (msg.mode ?? 'rewrite');
           if (mode !== 'rewrite' && mode !== 'prompt') throw new Error('Выберите режим обработки в настройках CalmCodex.');
-          if (msg.parts !== undefined && (!Array.isArray(msg.parts) || msg.parts.length < 2 ||
+          if (msg.parts !== undefined && (!Array.isArray(msg.parts) || msg.parts.length < 1 ||
               !msg.parts.every(part => typeof part === 'string' && part.trim()))) {
             throw new Error('Не удалось прочитать фрагменты черновика. Текст сохранён.');
           }
           reply.mode = mode;
-          // Each result belongs to its original editor range. Neighbouring text never enters the call.
-          if (mode === 'prompt' && msg.parts) reply.parts = await rewriteParts(engine, msg.parts, mode);
-          else reply.text = await rewrite(engine, msg.text, mode);
+          const options = processingOptions(config);
+          // Neighbours explain intent; only the target fragment may be replaced.
+          if (mode === 'prompt' && msg.parts) reply.parts = await rewriteParts(engine, msg.parts, mode, options);
+          else reply.text = await rewrite(engine, msg.text, mode, options);
         }
       } catch (err) { reply.error = err.message; }
       await view.postMessage(reply);

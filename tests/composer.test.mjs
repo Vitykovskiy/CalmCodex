@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { test } from 'node:test';
 import { schema } from 'prosemirror-schema-basic';
-import { EditorState } from 'prosemirror-state';
+import { EditorState, TextSelection } from 'prosemirror-state';
 
 // The composer uses the VS Code webview message API. Tests supply its reply channel.
 const win = globalThis.window = new EventTarget();
@@ -69,7 +69,7 @@ test('a full prompt preview routes its mode and is submitted without another rew
   const requests = [];
   replyWith((raw, message) => {
     requests.push(message);
-    return 'Исправь двойное сохранение. API сохрани.';
+    return { mode: 'prompt', parts: ['Исправь двойное сохранение. API сохрани.'] };
   });
   const controller = editor(doc(paragraph(text('Блин, сохранение дважды. Почини, API не трогай.'))));
   requestPreview(controller, 'prompt');
@@ -79,6 +79,113 @@ test('a full prompt preview routes its mode and is submitted without another rew
   assert.equal(requests.length, 1);
   assert.equal(requests[0].auto, false);
   assert.equal(requests[0].mode, 'prompt');
+});
+
+test('prompt mode can organize the whole plain import draft and move the task before its context', async () => {
+  const paragraphs = [
+    'Я все таки думаю, что взять за основу вариант Б с модальным окном, но у нас в постановке вроде как должен быть вариант с созданием шаблона без выбора файла, так?',
+    'В ui это нужно продумать. Сделать реестр шаблонов импорта? В администриование добавить?',
+    'ТАм будет реестр шаблонов наверное и карточки шаблонов. И эта карточка может быть как в модалке импорта, так и как карточка в реестре щаблонов. Что думаешь?',
+    'Сделай ка чернвоик импорта такой'
+  ];
+  const prepared = [
+    'Подготовь черновик интерфейса импорта. За основу предлагаю вариант Б с модальным окном.',
+    'В постановке, кажется, предусмотрено создание шаблона без выбора файла — так ли это?',
+    'Продумай реестр шаблонов импорта — возможно, в администрировании. Карточка может использоваться в модалке импорта и в реестре. Что думаешь?'
+  ];
+  let calls = 0;
+  replyWith((raw, message) => {
+    calls++;
+    // This checks transport and replacement; the real model's intent is covered separately.
+    assert.deepEqual(message.parts, [paragraphs.join('\n\n')]);
+    assert.match(raw, /`CC-/u, 'The conservative rewrite input retains its original boundaries.');
+    return { mode: 'prompt', parts: [prepared.join('\n\n')] };
+  });
+  const controller = editor(doc(...paragraphs.map(value => paragraph(text(value)))));
+  assert.deepEqual(await prepare(controller, {}, () => true), {});
+  assert.equal(calls, 1);
+  assert.deepEqual(controller.view.state.doc.toJSON(),
+    doc(...prepared.map(value => paragraph(text(value)))).toJSON());
+});
+
+test('plain paragraphs still keep their original boundaries in rewrite mode', async () => {
+  const original = doc(paragraph(text('Блин, описание.')), paragraph(text('Сделай черновик.')));
+  replyWith((raw, message) => {
+    assert.deepEqual(message.parts, ['Блин, описание.\n\nСделай черновик.']);
+    assert.match(raw, /`CC-/u);
+    return { mode: 'rewrite', text: raw.replace('Блин, описание.', 'Описание.') };
+  });
+  const controller = editor(original);
+  assert.deepEqual(await prepare(controller, {}, () => true), {});
+  assert.equal(controller.view.state.doc.childCount, 2);
+  assert.equal(controller.view.state.doc.child(0).textContent, 'Описание.');
+  assert.equal(controller.view.state.doc.child(1), original.child(1));
+});
+
+test('prompt blocks include soft line breaks and may remove noise across plain paragraphs', async () => {
+  const hardBreak = schema.nodes.hard_break.create();
+  replyWith((raw, message) => {
+    assert.deepEqual(message.parts, ['Блядь!\nОдин текст.\n\nДобавь макет.']);
+    return { mode: 'prompt', parts: ['Добавь макет.\nСейчас показан только текст.'] };
+  });
+  const controller = editor(doc(
+    paragraph(text('Блядь!'), hardBreak, text('Один текст.')),
+    paragraph(text('Добавь макет.'))
+  ));
+  assert.deepEqual(await prepare(controller, {}, () => true), {});
+  assert.deepEqual(controller.view.state.doc.toJSON(), doc(
+    paragraph(text('Добавь макет.'), hardBreak, text('Сейчас показан только текст.'))
+  ).toJSON());
+});
+
+test('a hard break with custom attributes keeps its identity during a prompt edit', async () => {
+  const customSchema = new schema.constructor({
+    nodes: schema.spec.nodes.update('hard_break', {
+      ...schema.spec.nodes.get('hard_break'), attrs: { origin: { default: null } }
+    }),
+    marks: schema.spec.marks
+  });
+  const hardBreak = customSchema.nodes.hard_break.create({ origin: 'keep-me' });
+  const original = customSchema.node('doc', null, [
+    customSchema.node('paragraph', null, [
+      customSchema.text('Блин, добавь макет.'), hardBreak, customSchema.text('API сохрани.')
+    ])
+  ]);
+  replyWith((raw, message) => {
+    assert.equal(message.parts.length, 1);
+    assert.match(message.parts[0], /`CC-/u, 'A non-default break uses the protected range plan.');
+    return { mode: 'prompt', parts: [message.parts[0].replace('Блин, добавь', 'Добавь')] };
+  });
+  const controller = editor(original);
+  assert.deepEqual(await prepare(controller, {}, () => true), {});
+  const result = controller.view.state.doc.child(0);
+  assert.equal(result.child(0).text, 'Добавь макет.');
+  assert.equal(result.child(1), hardBreak);
+  assert.equal(result.child(1).attrs.origin, 'keep-me');
+  assert.equal(result.child(2).text, 'API сохрани.');
+});
+
+test('a partial prompt preview replaces only the selection and keeps paragraph structure', async () => {
+  const controller = editor(doc(
+    paragraph(text('До. Я фантазировать должен? После.')),
+    paragraph(text('Другой абзац.'))
+  ));
+  const from = 1 + 'До. '.length;
+  const to = from + 'Я фантазировать должен?'.length;
+  controller.view.dispatch(controller.view.state.tr.setSelection(TextSelection.create(controller.view.state.doc, from, to)));
+  let calls = 0;
+  replyWith((raw, message) => {
+    calls++;
+    assert.equal(raw, 'Я фантазировать должен?');
+    assert.deepEqual(message.parts, ['Я фантазировать должен?']);
+    return { mode: 'prompt', parts: ['Покажи результат.'] };
+  });
+  requestPreview(controller, 'prompt');
+  await new Promise(setImmediate);
+  assert.equal(calls, 1);
+  assert.equal(controller.view.state.doc.childCount, 2);
+  assert.equal(controller.view.state.doc.child(0).textContent, 'До. Покажи результат. После.');
+  assert.equal(controller.view.state.doc.child(1).textContent, 'Другой абзац.');
 });
 
 test('a failed prompt preview preserves the draft and cancels a pending submit', async () => {
@@ -115,6 +222,20 @@ test('plain dictation uses the same rewrite for display and history', async () =
   }, () => true);
   assert.equal(result.promptRawOverride, 'Почему 403?');
   assert.equal(result.persistedPromptRawOverride, 'Почему 403?');
+});
+
+test('plain prompt dictation without an editor document remains a single text replacement', async () => {
+  const transcript = 'Есть описание. Сделай черновик.';
+  replyWith((raw, message) => {
+    assert.equal(raw, transcript);
+    assert.equal(message.parts, undefined);
+    return { mode: 'prompt', text: 'Сделай черновик по описанию.' };
+  });
+  const result = await prepare(editor(doc(paragraph())), {
+    promptRawOverride: transcript, persistedPromptRawOverride: transcript
+  }, () => true);
+  assert.equal(result.promptRawOverride, 'Сделай черновик по описанию.');
+  assert.equal(result.persistedPromptRawOverride, result.promptRawOverride);
 });
 
 test('prompt regions keep the example caption and attachment before the following requirements', async () => {
@@ -159,7 +280,8 @@ test('a flattened prompt answer with its boundary moved to the end preserves the
 });
 
 test('a structured prompt requires a validated mode and a complete region array', async () => {
-  const original = doc(paragraph(text('Подпись.')), paragraph(text('Требование.')));
+  const image = schema.nodes.image.create({ src: 'file:///test/example.png' });
+  const original = doc(paragraph(text('Подпись.'), image), paragraph(text('Требование.')));
   for (const reply of [
     { mode: undefined, text: 'Слитый текст.' },
     { mode: 'prompt', parts: ['Одна часть.'] },
@@ -178,10 +300,46 @@ test('an empty prompt region removes noise and allows the remaining task to subm
     assert.deepEqual(message.parts, ['Блядь!', 'Поправь чтение.']);
     return { mode: 'prompt', parts: ['', 'Исправь чтение.'] };
   });
-  const controller = editor(doc(paragraph(text('Блядь!')), paragraph(text('Поправь чтение.'))));
+  const image = schema.nodes.image.create({ src: 'file:///test/example.png' });
+  const controller = editor(doc(paragraph(text('Блядь!')), paragraph(image), paragraph(text('Поправь чтение.'))));
   assert.deepEqual(await prepare(controller, {}, () => true), {});
-  assert.equal(controller.view.state.doc.child(0).textContent, '');
+  assert.equal(controller.view.state.doc.childCount, 2);
+  assert.equal(controller.view.state.doc.child(0).firstChild, image);
   assert.equal(controller.view.state.doc.child(1).textContent, 'Исправь чтение.');
+});
+
+test('code and formatting separate plain prompt blocks while preserving protected nodes', async () => {
+  const bold = schema.marks.strong.create();
+  const code = schema.node('code_block', null, text('const limit = 3;'));
+  const formatted = paragraph(text('Требование: ', [bold]), text('API сохрани.'));
+  const original = doc(
+    paragraph(text('Контекст до.')), paragraph(text('Сделай первый черновик.')),
+    code,
+    paragraph(text('Контекст после.')), paragraph(text('Сделай второй черновик.')),
+    formatted,
+    paragraph(text('Итог.'))
+  );
+  replyWith((raw, message) => {
+    assert.equal(message.parts.length, 4);
+    assert.equal(message.parts[0], 'Контекст до.\n\nСделай первый черновик.');
+    assert.equal(message.parts[1], 'Контекст после.\n\nСделай второй черновик.');
+    assert.match(message.parts[2], /^Требование: `CC-[^`]+`API сохрани\.$/u);
+    assert.equal(message.parts[3], 'Итог.');
+    assert.doesNotMatch(message.parts.join('\n'), /const limit/u);
+    return { mode: 'prompt', parts: [
+      'Сделай первый черновик по контексту до.',
+      'Сделай второй черновик по контексту после.',
+      message.parts[2], message.parts[3]
+    ] };
+  });
+  const controller = editor(original);
+  assert.deepEqual(await prepare(controller, {}, () => true), {});
+  const result = controller.view.state.doc;
+  assert.equal(result.childCount, 5);
+  assert.equal(result.child(1), code);
+  assert.equal(result.child(3), formatted);
+  assert.equal(result.child(0).textContent, 'Сделай первый черновик по контексту до.');
+  assert.equal(result.child(2).textContent, 'Сделай второй черновик по контексту после.');
 });
 
 test('formatting boundaries keep the negated verb in the same prompt region', async () => {
@@ -215,14 +373,14 @@ test('one failed prompt region leaves all editor ranges unchanged', async () => 
   assert.equal(controller.view.state.doc, original);
 });
 
-test('an edit while isolated prompt regions are pending survives their result', async () => {
+test('an edit while grouped prompt blocks are pending survives their result', async () => {
   let finish;
   replyWith(() => new Promise(resolve => { finish = resolve; }));
   const controller = editor(doc(paragraph(text('Подпись.')), paragraph(text('Требование.'))));
   const pending = prepare(controller, {}, () => true);
   controller.view.dispatch(controller.view.state.tr.insertText('Уточнение. ', 1));
   const edited = controller.view.state.doc;
-  finish({ mode: 'prompt', parts: ['Другая подпись.', 'Другое требование.'] });
+  finish({ mode: 'prompt', parts: ['Другая подпись.\n\nДругое требование.'] });
   assert.equal(await pending, null);
   assert.equal(controller.view.state.doc, edited);
 });

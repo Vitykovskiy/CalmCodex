@@ -54,10 +54,10 @@ if CommandLine.arguments.dropFirst() == ["--register-shortcut"] {
     do {
         let command = try ProcessingMode.fromCommandLine(Array(CommandLine.arguments.dropFirst()))
         let data = FileHandle.standardInput.readDataToEndOfFile()
-        guard let input = String(data: data, encoding: .utf8) else {
-            throw DraftError("Нужен текст в кодировке UTF-8.")
-        }
-        let output = try Rewriter().rewrite(input, mode: command.mode, allowEmpty: command.allowEmpty)
+        let input = try RewriteRequest(data: data, format: command.inputFormat)
+        let output = try Rewriter().rewrite(input.draft, mode: command.mode, allowEmpty: command.allowEmpty,
+                                          context: input.context, modelOverride: command.model,
+                                          reasoningOverride: command.reasoningEffort, ultracaveOverride: command.ultracave)
         FileHandle.standardOutput.write(Data(output.utf8))
     } catch {
         FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8))

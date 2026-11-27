@@ -10,6 +10,10 @@ const vm = require('node:vm');
 const extensionPath = path.resolve(__dirname, '../extension');
 const source = readFileSync(path.join(extensionPath, 'extension.cjs'), 'utf8');
 
+function engineInput(call) {
+  return call.args.includes('--stdin-json') ? JSON.parse(call.input) : { draft: call.input };
+}
+
 function harness(settings = {}, outcome = { text: 'Готовый текст.' }) {
   const commands = new Map();
   const calls = [];
@@ -85,7 +89,7 @@ function harness(settings = {}, outcome = { text: 'Готовый текст.' }
 test('automatic processing defaults to the existing rewrite mode', async () => {
   const h = harness();
   const reply = await h.receive();
-  assert.deepEqual(h.calls[0].args, ['--stdin']);
+  assert.deepEqual(h.calls[0].args, ['--stdin', '--ultracave']);
   assert.equal(h.calls[0].input, 'Исходный черновик.');
   assert.equal(reply.text, 'Готовый текст.');
 });
@@ -93,15 +97,56 @@ test('automatic processing defaults to the existing rewrite mode', async () => {
 test('automatic processing selects its configured mode instead of a message override', async () => {
   const h = harness({ mode: 'prompt' });
   const reply = await h.receive({ mode: 'rewrite' });
-  assert.deepEqual(h.calls[0].args, ['--stdin', '--mode', 'prompt']);
+  assert.deepEqual(h.calls[0].args, ['--stdin', '--mode', 'prompt', '--ultracave']);
   assert.equal(reply.text, 'Готовый текст.');
+});
+
+test('model and reasoning settings reach both manual and automatic calls', async () => {
+  for (const mode of ['rewrite', 'prompt']) {
+    for (const auto of [true, false]) {
+      const h = harness({ mode, model: ' gpt-6.2-sol ', reasoningEffort: 'medium' });
+      const reply = await h.receive({ auto, mode });
+      assert.deepEqual(h.calls[0].args, [
+        '--stdin', ...(mode === 'prompt' ? ['--mode', 'prompt'] : []),
+        '--model', 'gpt-6.2-sol', '--reasoning-effort', 'medium', '--ultracave'
+      ]);
+      assert.equal(h.calls[0].input, 'Исходный черновик.');
+      assert.equal(reply.error, undefined);
+    }
+  }
+});
+
+test('Ultracave can be disabled in either mode without a second model call', async () => {
+  for (const mode of ['rewrite', 'prompt']) {
+    for (const ultracave of [true, false]) {
+      const h = harness({ mode, ultracave });
+      await h.receive();
+      assert.equal(h.calls.length, 1);
+      assert.equal(h.calls[0].args.at(-1), ultracave ? '--ultracave' : '--no-ultracave');
+    }
+  }
+  const invalid = harness({ ultracave: 'false' });
+  assert.match((await invalid.receive()).error, /calmCodex\.ultracave/);
+  assert.equal(invalid.calls.length, 0);
+});
+
+test('invalid model settings fail before starting the engine', async () => {
+  for (const settings of [
+    { model: 42 }, { model: 'gpt model' }, { model: '--help' },
+    { reasoningEffort: 'turbo' }, { reasoningEffort: 2 }
+  ]) {
+    const h = harness(settings);
+    assert.match((await h.receive()).error, /calmCodex\.(?:model|reasoningEffort)/);
+    assert.equal(h.calls.length, 0);
+  }
 });
 
 test('manual commands select either mode even with automatic processing disabled', async () => {
   for (const mode of ['rewrite', 'prompt']) {
     const h = harness({ mode: mode === 'prompt' ? 'rewrite' : 'prompt', rewriteOnSend: false });
     const reply = await h.receive({ auto: false, mode });
-    assert.deepEqual(h.calls[0].args, mode === 'prompt' ? ['--stdin', '--mode', 'prompt'] : ['--stdin']);
+    assert.deepEqual(h.calls[0].args, mode === 'prompt'
+      ? ['--stdin', '--mode', 'prompt', '--ultracave'] : ['--stdin', '--ultracave']);
     assert.equal(reply.text, 'Готовый текст.');
     assert.equal(reply.bypass, undefined);
   }
@@ -110,7 +155,7 @@ test('manual commands select either mode even with automatic processing disabled
 test('a legacy preview without a mode still rewrites, regardless of automatic mode', async () => {
   const h = harness({ mode: 'prompt' });
   await h.receive({ auto: false });
-  assert.deepEqual(h.calls[0].args, ['--stdin']);
+  assert.deepEqual(h.calls[0].args, ['--stdin', '--ultracave']);
 });
 
 test('disabled automatic processing bypasses the engine', async () => {
@@ -159,18 +204,42 @@ test('engine failures return an error without replacement text in prompt mode', 
   }
 });
 
-test('prompt mode processes editor regions in isolation and preserves their result order', async () => {
+test('prompt regions receive their original neighbours as context and retain result order', async () => {
   const parts = ['Импорт падает. Вот пример:', 'Поправь чтение. CSV не меняй.'];
-  const h = harness({ mode: 'prompt' }, call => ({ text: call.input.replace('Поправь', 'Исправь') }));
+  const h = harness({ mode: 'prompt' }, call => ({ text: engineInput(call).draft.replace('Поправь', 'Исправь') }));
   const reply = await h.receive({ text: parts.join('\n`CC-boundary`\n'), parts });
   assert.equal(reply.mode, 'prompt');
   assert.equal(reply.text, undefined);
   assert.deepEqual(Array.from(reply.parts), [parts[0], 'Исправь чтение. CSV не меняй.']);
-  assert.deepEqual(h.calls.map(call => call.input), parts);
-  for (const call of h.calls) {
+  for (const [index, call] of h.calls.entries()) {
+    assert.deepEqual(engineInput(call), {
+      draft: parts[index], context: { before: parts.slice(0, index), after: parts.slice(index + 1) }
+    });
+    assert.deepEqual(call.args, ['--stdin-json', '--mode', 'prompt', '--allow-empty', '--ultracave']);
     assert.equal(call.options.detached, true);
     assert.ok(call.options.signal);
     assert.doesNotMatch(call.input, /CC-boundary/);
+  }
+});
+
+test('the rhetorical mockup complaint keeps earlier context and later constraints in its own call', async () => {
+  const parts = [
+    'Снова нет макетов. Добавь к элементу и его описанию фрагмент макета.',
+    'Я фантазировать что-ли должен, как это всё выглядит?',
+    'Код не меняй. Почему изображение исчезло после экспорта?'
+  ];
+  const expected = [parts[0], 'Покажи, как это выглядит.', parts[2]];
+  const h = harness({ mode: 'prompt', model: 'gpt-6-luna', reasoningEffort: 'medium' }, call => {
+    const input = engineInput(call);
+    assert.deepEqual(input.context.before.concat(input.draft, input.context.after), parts);
+    return { text: expected[parts.indexOf(input.draft)] };
+  });
+  const reply = await h.receive({ text: parts.join('\n'), parts });
+  assert.deepEqual(Array.from(reply.parts), expected);
+  assert.equal(h.calls.length, 3);
+  for (const call of h.calls) {
+    assert.deepEqual(call.args, ['--stdin-json', '--mode', 'prompt', '--allow-empty',
+      '--model', 'gpt-6-luna', '--reasoning-effort', 'medium', '--ultracave']);
   }
 });
 
@@ -189,12 +258,12 @@ test('rewrite mode retains a single call for a structured editor document', asyn
 test('a successful empty prompt region is allowed only when another region has content', async () => {
   const parts = ['Блядь!', 'Поправь чтение.'];
   const mixed = harness({ mode: 'prompt' }, call => ({
-    text: call.input === parts[0] ? '' : 'Исправь чтение.'
+    text: engineInput(call).draft === parts[0] ? '' : 'Исправь чтение.'
   }));
   const reply = await mixed.receive({ parts });
   assert.deepEqual(Array.from(reply.parts), ['', 'Исправь чтение.']);
   for (const call of mixed.calls) {
-    assert.deepEqual(call.args, ['--stdin', '--mode', 'prompt', '--allow-empty']);
+    assert.deepEqual(call.args, ['--stdin-json', '--mode', 'prompt', '--allow-empty', '--ultracave']);
   }
   const empty = harness({ mode: 'prompt' }, { text: '' });
   assert.match((await empty.receive({ parts })).error, /Уточните/);
@@ -214,7 +283,7 @@ test('prompt batches run at most three processes and map out-of-order completion
   await new Promise(setImmediate);
   assert.equal(h.calls.length, 5);
   assert.equal(h.calls.filter(call => call.active).length, 3);
-  for (const call of h.calls.filter(call => call.active)) call.finish({ text: call.input.toUpperCase() });
+  for (const call of h.calls.filter(call => call.active)) call.finish({ text: engineInput(call).draft.toUpperCase() });
   const reply = await pending;
   assert.deepEqual(Array.from(reply.parts), parts.map(part => part.toUpperCase()));
   assert.ok(h.timers.every(timer => !timer.active));
@@ -259,8 +328,19 @@ test('an aborted signal never starts a process and a late abort never kills a co
   assert.equal(h.killedGroups.length, 0);
 });
 
+test('one complete prompt block is processed as a whole', async () => {
+  const draft = 'Я думаю взять вариант Б.\n\nРеестр шаблонов, наверное, в администрировании?\n\nСделай такой черновик.';
+  const h = harness({ mode: 'prompt', ultracave: false }, { text: 'Сделай черновик на основе варианта Б.\n\nОцени реестр шаблонов в администрировании.' });
+  const reply = await h.receive({ text: 'legacy encoded text', parts: [draft] });
+  assert.equal(h.calls.length, 1);
+  assert.deepEqual(engineInput(h.calls[0]), { draft, context: { before: [], after: [] } });
+  assert.deepEqual(h.calls[0].args, ['--stdin-json', '--mode', 'prompt', '--allow-empty', '--no-ultracave']);
+  assert.equal(reply.parts.length, 1);
+  assert.equal(reply.text, undefined);
+});
+
 test('malformed editor parts are rejected before starting the engine', async () => {
-  for (const parts of [[], ['one'], ['one', ''], ['one', 2], 'one']) {
+  for (const parts of [[], ['one', ''], ['one', 2], 'one']) {
     const h = harness({ mode: 'prompt' });
     const reply = await h.receive({ parts });
     assert.match(reply.error, /фрагменты/);

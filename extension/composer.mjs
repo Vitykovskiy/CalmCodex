@@ -14,7 +14,7 @@ function request(text, auto, mode, parts) {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pending.delete(id);
-      reject(new Error('Luna не ответила. Черновик сохранён.'));
+      reject(new Error('Модель не ответила. Черновик сохранён.'));
     }, 80000);
     pending.set(id, msg => {
       clearTimeout(timer);
@@ -25,10 +25,10 @@ function request(text, auto, mode, parts) {
       } else if (parts && msg.mode === 'prompt') {
         if (msg.text !== undefined || !Array.isArray(msg.parts) || msg.parts.length !== parts.length ||
             !msg.parts.every(part => typeof part === 'string') || !msg.parts.some(part => part.trim())) {
-          reject(new Error('Luna изменила границы фрагментов. Черновик сохранён.'));
+          reject(new Error('Модель изменила границы фрагментов. Черновик сохранён.'));
         } else resolve(msg);
       } else if (typeof msg.text === 'string') resolve(msg);
-      else reject(new Error('Не удалось получить текст от Luna.'));
+      else reject(new Error('Не удалось получить текст от модели.'));
     });
     try { post({ type: 'calmcodex/request', kind: 'rewrite', id, text, auto,
       ...(mode === undefined ? {} : { mode }), ...(parts ? { parts } : {}) }); }
@@ -153,7 +153,7 @@ function plan(doc, from, to) {
       const marker = separator.trim();
       const at = remaining.indexOf(marker);
       if (at === -1 || remaining.indexOf(marker, at + marker.length) !== -1) {
-        throw new Error('Luna изменила границы форматирования. Черновик сохранён.');
+        throw new Error('Модель изменила границы форматирования. Черновик сохранён.');
       }
       let before = remaining.slice(0, at);
       remaining = remaining.slice(at + marker.length);
@@ -187,6 +187,78 @@ function plan(doc, from, to) {
   return { source, parts, replacement };
 }
 
+function promptPlan(doc, from, to) {
+  function fixedRange(start, end) {
+    const edit = plan(doc, start, end);
+    return { parts: edit.parts ?? (edit.source.trim() ? [edit.source] : []), replacement: edit.replacement };
+  }
+  // A selection owns only its text ranges, not the surrounding paragraph structure.
+  if (from !== 0 || to !== doc.content.size) return fixedRange(from, to);
+
+  function isPlainParagraph(node) {
+    if (node.type.name !== 'paragraph' || node.type.spec.code || node.marks.length ||
+        JSON.stringify(node.attrs) !== JSON.stringify(node.type.defaultAttrs ?? {})) return false;
+    let plain = true;
+    node.forEach(child => {
+      if (child.marks.length || !(child.isText || /^(?:hard_?break|hardBreak)$/.test(child.type.name)) ||
+          (!child.isText && JSON.stringify(child.attrs) !== JSON.stringify(child.type.defaultAttrs ?? {}))) plain = false;
+    });
+    return plain;
+  }
+
+  const groups = [];
+  doc.forEach((node, pos) => {
+    const plain = isPlainParagraph(node);
+    let group = groups.at(-1);
+    if (!group || group.plain !== plain) {
+      group = { plain, from: pos, to: pos, nodes: [] };
+      groups.push(group);
+    }
+    group.nodes.push(node);
+    group.to = pos + node.nodeSize;
+  });
+
+  const parts = [];
+  const edits = [];
+  for (const group of groups) {
+    const start = parts.length;
+    if (!group.plain) {
+      const edit = fixedRange(group.from, group.to);
+      parts.push(...edit.parts);
+      if (edit.parts.length) edits.push({ start, end: parts.length, replacement: edit.replacement });
+      continue;
+    }
+    const source = group.nodes.map(node => node.textBetween(0, node.content.size, '\n', '\n')).join('\n\n');
+    if (!source.trim()) continue;
+    parts.push(source);
+    edits.push({ start, end: parts.length, replacement(tr, answer) {
+      const next = answer[0];
+      if (next === source) return tr;
+      if (!next.trim()) return tr.delete(group.from, group.to);
+      const schema = doc.type.schema;
+      const hardBreak = schema.nodes.hard_break || schema.nodes.hardBreak || schema.nodes.hardbreak;
+      const paragraphs = next.replace(/\r\n?/g, '\n').split('\n\n').map(value => {
+        const inline = [];
+        for (const [index, line] of value.split('\n').entries()) {
+          if (index) inline.push(hardBreak ? hardBreak.create() : schema.text('\n'));
+          if (line.length) inline.push(schema.text(line));
+        }
+        return group.nodes[0].type.create(group.nodes[0].attrs, inline);
+      });
+      return tr.replaceWith(group.from, group.to, paragraphs);
+    } });
+  }
+
+  return { parts, replacement(tr, answer) {
+    // Original positions remain valid when complete blocks and protected ranges are replaced backwards.
+    for (let index = edits.length - 1; index >= 0; index--) {
+      const edit = edits[index];
+      edit.replacement(tr, answer.slice(edit.start, edit.end));
+    }
+    return tr;
+  } };
+}
+
 function ensureCurrent(slot, doc, revision, stillHere, action) {
   if (slot.view.isDestroyed || !slot.view.dom.isConnected || slot.view.state.doc !== doc || slot.revision !== revision || !stillHere()) {
     throw new Error(action);
@@ -199,14 +271,18 @@ async function preview({ slot, doc, selection, mode }) {
   slot.busy = true;
   const revision = slot.revision;
   try {
-    const edit = plan(doc, whole ? 0 : selection.from, whole ? doc.content.size : selection.to);
+    const from = whole ? 0 : selection.from;
+    const to = whole ? doc.content.size : selection.to;
+    const edit = plan(doc, from, to);
     if (!edit.source.trim()) return true;
+    const prompt = promptPlan(doc, from, to);
     status(slot, mode === 'prompt' ? 'Готовлю промпт…' : 'Переформулирую…');
-    const result = await request(edit.source, false, mode, edit.parts);
+    const result = await request(edit.source, false, mode, prompt.parts);
     ensureCurrent(slot, doc, revision, () => true, 'Черновик изменился. Ваша правка сохранена.');
     if (!result.bypass) {
-      const tr = edit.replacement(slot.view.state.tr,
-        edit.parts && result.mode === 'prompt' ? result.parts : result.text);
+      const tr = result.mode === 'prompt'
+        ? prompt.replacement(slot.view.state.tr, result.parts)
+        : edit.replacement(slot.view.state.tr, result.text);
       if (tr.docChanged) slot.view.dispatch(tr);
       if (whole) slot.cleaned = slot.view.state.doc;
     }
@@ -241,8 +317,9 @@ export async function prepare(controller, options, stillHere) {
     const edit = doc && plan(doc, 0, doc.content.size);
     const source = edit ? edit.source : raw;
     if (!source.trim()) return options;
+    const prompt = doc && promptPlan(doc, 0, doc.content.size);
     status(slot, 'Переформулирую…');
-    const answer = await request(source, true, undefined, edit?.parts);
+    const answer = await request(source, true, undefined, prompt?.parts);
     ensureCurrent(slot, live, revision, stillHere, 'Черновик изменился. Отправка отменена.');
     status(slot, '');
     if (answer.bypass || answer.text === source) return options;
@@ -252,15 +329,17 @@ export async function prepare(controller, options, stillHere) {
     }
     if (frozen) {
       const state = view.state.constructor.create({ schema: doc.type.schema, doc });
-      const updated = edit.replacement(state.tr,
-        edit.parts && answer.mode === 'prompt' ? answer.parts : answer.text).doc;
+      const updated = (answer.mode === 'prompt'
+        ? prompt.replacement(state.tr, answer.parts)
+        : edit.replacement(state.tr, answer.text)).doc;
       const format = options.submittedDocumentFormat;
       return { ...options, submittedDocument: updated,
         promptRawOverride: controller.getText(updated, { format }),
         persistedPromptRawOverride: controller.getPersistedText(updated, { format }) };
     }
-    const tr = edit.replacement(view.state.tr,
-      edit.parts && answer.mode === 'prompt' ? answer.parts : answer.text);
+    const tr = answer.mode === 'prompt'
+      ? prompt.replacement(view.state.tr, answer.parts)
+      : edit.replacement(view.state.tr, answer.text);
     if (tr.docChanged) view.dispatch(tr);
     slot.cleaned = view.state.doc;
     return options;

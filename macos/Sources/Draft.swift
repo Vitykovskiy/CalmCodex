@@ -62,12 +62,12 @@ struct ProtectedDraft {
         let tokens = literals.indices.map { "\(prefix)\($0 + 1)⟧" }
         guard tokens.allSatisfy({ text.components(separatedBy: $0).count == 2 }),
               text.components(separatedBy: prefix).count == tokens.count + 1 else {
-            throw DraftError("Luna изменила буквальный фрагмент. Выделенный текст сохранён.")
+            throw DraftError("Модель изменила буквальный фрагмент. Выделенный текст сохранён.")
         }
         var cursor = text.startIndex
         for token in tokens {
             guard let range = text.range(of: token, range: cursor..<text.endIndex) else {
-                throw DraftError("Luna изменила порядок буквальных фрагментов. Выделенный текст сохранён.")
+                throw DraftError("Модель изменила порядок буквальных фрагментов. Выделенный текст сохранён.")
             }
             cursor = range.upperBound
         }
@@ -81,7 +81,7 @@ struct ProtectedDraft {
             guard let outputLine = outputLines.first(where: {
                 $0.trimmingCharacters(in: .whitespaces) == token
             }) else {
-                throw DraftError("Luna изменила строки буквального фрагмента. Выделенный текст сохранён.")
+                throw DraftError("Модель изменила строки буквального фрагмента. Выделенный текст сохранён.")
             }
             // Restore horizontal whitespace ourselves: model-added indentation can change Markdown.
             text = text.replacingOccurrences(of: outputLine, with: sourceLine)
