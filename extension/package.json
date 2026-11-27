@@ -2,8 +2,8 @@
   "name": "calmcodex",
   "displayName": "CalmCodex",
   "publisher": "local-calmcodex",
-  "description": "Спокойная формулировка при отправке и в контекстном меню поля Codex.",
-  "version": "2.1.0",
+  "description": "Спокойная формулировка и подготовка промпта при отправке в Codex.",
+  "version": "2.2.0",
   "engines": {
     "vscode": "^1.96.2"
   },
@@ -22,12 +22,20 @@
       {
         "command": "calmCodex.preview",
         "title": "Переформулировать для Codex"
+      },
+      {
+        "command": "calmCodex.optimize",
+        "title": "Подготовить промпт для Codex"
       }
     ],
     "menus": {
       "commandPalette": [
         {
           "command": "calmCodex.preview",
+          "when": "false"
+        },
+        {
+          "command": "calmCodex.optimize",
           "when": "false"
         }
       ],
@@ -36,6 +44,11 @@
           "command": "calmCodex.preview",
           "when": "calmCodexComposer && (webviewId == 'chatgpt.sidebarView' || webviewId == 'chatgpt.sidebarSecondaryView' || webviewId == 'chatgpt.panelView' || webviewId == 'chatgpt.conversationEditor')",
           "group": "navigation@1"
+        },
+        {
+          "command": "calmCodex.optimize",
+          "when": "calmCodexComposer && (webviewId == 'chatgpt.sidebarView' || webviewId == 'chatgpt.sidebarSecondaryView' || webviewId == 'chatgpt.panelView' || webviewId == 'chatgpt.conversationEditor')",
+          "group": "navigation@2"
         }
       ]
     },
@@ -46,7 +59,18 @@
           "type": "boolean",
           "default": true,
           "scope": "application",
-          "description": "Переформулировать текст перед обычной отправкой в Codex. Контекстное меню работает независимо."
+          "description": "Обрабатывать текст перед обычной отправкой в Codex. Контекстное меню работает независимо."
+        },
+        "calmCodex.mode": {
+          "type": "string",
+          "enum": ["rewrite", "prompt"],
+          "enumDescriptions": [
+            "Убрать эмоциональный шум, сохранив смысл и тип реплики.",
+            "Сформулировать задачу для Codex: цель, контекст, ограничения и ожидаемый результат."
+          ],
+          "default": "rewrite",
+          "scope": "application",
+          "description": "Режим обработки перед отправкой. Команды контекстного меню выбирают свой режим."
         }
       }
     }

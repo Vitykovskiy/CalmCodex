@@ -36,11 +36,11 @@ struct Rewriter {
         return URL(fileURLWithPath: path)
     }
 
-    func rewrite(_ original: String) throws -> String {
+    func rewrite(_ original: String, mode: ProcessingMode = .rewrite, allowEmpty: Bool = false) throws -> String {
         let draft = try ProtectedDraft(original)
         if draft.isSingleLiteral { return original }
         let binary = try executable()
-        guard let instructions = Bundle.main.url(forResource: "editor", withExtension: "txt"),
+        guard let instructions = Bundle.main.url(forResource: mode.resourceName, withExtension: "txt"),
               let schema = Bundle.main.url(forResource: "response", withExtension: "json") else {
             throw DraftError("Файлы службы повреждены. Переустановите CalmCodex из архива.")
         }
@@ -53,7 +53,7 @@ struct Rewriter {
         encoder.outputFormatting = .withoutEscapingSlashes
         let instructionPath = String(decoding: try encoder.encode(instructions.path), as: UTF8.self)
         let payload = String(decoding: try encoder.encode(["draft": draft.masked]), as: UTF8.self)
-        let input = Data(("Переформулируй реплику пользователя в поле draft по правилам редактора. Верни её от лица пользователя.\n" + payload).utf8)
+        let input = Data((mode.instruction + "\n" + payload).utf8)
         let result = temp.appendingPathComponent("result.json")
         let diagnostic = temp.appendingPathComponent("diagnostic.jsonl")
         guard files.createFile(atPath: diagnostic.path, contents: nil) else {
@@ -102,7 +102,7 @@ struct Rewriter {
               let response = try? JSONDecoder().decode(Reply.self, from: data) else {
             throw DraftError("Codex вернул неполный ответ. Выделенный текст сохранён.")
         }
-        return try draft.restore(response.text)
+        return try draft.restore(response.text, allowEmpty: allowEmpty)
     }
 
     private func failure(details: String, model: String) -> DraftError {

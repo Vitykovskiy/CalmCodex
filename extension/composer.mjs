@@ -9,7 +9,7 @@ let pointerSelection;
 
 export function connect(send) { post = send; }
 
-function request(text, auto) {
+function request(text, auto, mode, parts) {
   const id = crypto.randomUUID();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -19,10 +19,19 @@ function request(text, auto) {
     pending.set(id, msg => {
       clearTimeout(timer);
       if (msg.error) reject(new Error(msg.error));
-      else if (msg.bypass || typeof msg.text === 'string') resolve(msg);
+      else if (msg.bypass) resolve(msg);
+      else if (parts && (msg.mode !== 'rewrite' && msg.mode !== 'prompt' || mode && msg.mode !== mode)) {
+        reject(new Error('Не удалось проверить режим обработки. Черновик сохранён.'));
+      } else if (parts && msg.mode === 'prompt') {
+        if (msg.text !== undefined || !Array.isArray(msg.parts) || msg.parts.length !== parts.length ||
+            !msg.parts.every(part => typeof part === 'string') || !msg.parts.some(part => part.trim())) {
+          reject(new Error('Luna изменила границы фрагментов. Черновик сохранён.'));
+        } else resolve(msg);
+      } else if (typeof msg.text === 'string') resolve(msg);
       else reject(new Error('Не удалось получить текст от Luna.'));
     });
-    try { post({ type: 'calmcodex/request', kind: 'rewrite', id, text, auto }); }
+    try { post({ type: 'calmcodex/request', kind: 'rewrite', id, text, auto,
+      ...(mode === undefined ? {} : { mode }), ...(parts ? { parts } : {}) }); }
     catch (error) { pending.delete(id); clearTimeout(timer); reject(error); }
   });
 }
@@ -38,7 +47,7 @@ window.addEventListener('message', event => {
     const target = contextTarget;
     contextTarget = undefined;
     if (target.slot.busy) return;
-    const job = preview(target);
+    const job = preview({ ...target, mode: msg.mode ?? 'rewrite' });
     target.slot.previewDone = job;
     void job.finally(() => { if (target.slot.previewDone === job) target.slot.previewDone = undefined; });
   }
@@ -104,13 +113,25 @@ document.addEventListener('contextmenu', event => {
 
 function plan(doc, from, to) {
   const runs = [];
+  const regionStarts = [];
+  let protectedBoundary = false;
   doc.nodesBetween(from, to, (node, pos, parent) => {
-    if (node.type.spec.code || node.marks.some(mark => mark.type.spec.code || mark.type.name === 'code')) return false;
-    if (!node.isText) return;
+    if (!node.isText) {
+      if (node.type.spec.code || (node.isAtom && !/^(?:hard_?break|hardBreak)$/.test(node.type.name))) {
+        protectedBoundary = true;
+        return false;
+      }
+      return;
+    }
+    if (node.marks.some(mark => mark.type.spec.code || mark.type.name === 'code')) return false;
     const start = Math.max(from, pos);
     const end = Math.min(to, pos + node.nodeSize);
     const text = node.text.slice(start - pos, end - pos);
-    if (text.trim()) runs.push({ start, end, text, marks: node.marks, parent });
+    if (!text.trim()) return;
+    // Inline formatting divides editor ranges, but the model still needs the whole phrase.
+    if (protectedBoundary || runs.at(-1)?.parent !== parent) regionStarts.push(runs.length);
+    protectedBoundary = false;
+    runs.push({ start, end, text, marks: node.marks, parent });
   });
   // Each immutable boundary protects nodes and marks such as file mentions, links, and paragraph breaks.
   const id = crypto.randomUUID().slice(0, 12);
@@ -118,14 +139,20 @@ function plan(doc, from, to) {
     const marker = String.fromCharCode(96) + 'CC-' + id + '-' + index + String.fromCharCode(96);
     return run.parent === runs[index].parent ? marker : '\n'+marker+'\n';
   });
-  const source = runs.map((run,index)=>(separators[index - 1] || '') + run.text).join('');
-  function replacement(tr, answer) {
+  function encode(start, end) {
+    return runs.slice(start, end).map((run, index) =>
+      (index ? separators[start + index - 1] : '') + run.text).join('');
+  }
+  const source = encode(0, runs.length);
+  const regions = regionStarts.map((start, index) => [start, regionStarts[index + 1] ?? runs.length]);
+  const parts = regions.length > 1 ? regions.map(([start, end]) => encode(start, end)) : undefined;
+  function decode(answer, start, end) {
     const segments = [];
     let remaining = answer;
-    for (const separator of separators) {
+    for (const separator of separators.slice(start, end - 1)) {
       const marker = separator.trim();
       const at = remaining.indexOf(marker);
-      if (at === -1 || remaining.indexOf(marker, at+marker.length) !== -1) {
+      if (at === -1 || remaining.indexOf(marker, at + marker.length) !== -1) {
         throw new Error('Luna изменила границы форматирования. Черновик сохранён.');
       }
       let before = remaining.slice(0, at);
@@ -137,6 +164,12 @@ function plan(doc, from, to) {
       segments.push(before);
     }
     segments.push(remaining);
+    return segments;
+  }
+  function replacement(tr, answer) {
+    const segments = Array.isArray(answer)
+      ? regions.flatMap(([start, end], index) => decode(answer[index], start, end))
+      : decode(answer, 0, runs.length);
     const schema = doc.type.schema;
     const hardBreak = schema.nodes.hard_break || schema.nodes.hardBreak || schema.nodes.hardbreak;
     for (let i = runs.length - 1; i >= 0; --i) {
@@ -151,7 +184,7 @@ function plan(doc, from, to) {
     }
     return tr;
   }
-  return { source, replacement };
+  return { source, parts, replacement };
 }
 
 function ensureCurrent(slot, doc, revision, stillHere, action) {
@@ -160,7 +193,7 @@ function ensureCurrent(slot, doc, revision, stillHere, action) {
   }
 }
 
-async function preview({ slot, doc, selection }) {
+async function preview({ slot, doc, selection, mode }) {
   if (slot.busy || slot.view.state.doc !== doc || !slot.view.dom.isConnected) return;
   const whole = selection.empty || (selection.from <= 1 && selection.to >= doc.content.size - 1);
   slot.busy = true;
@@ -168,11 +201,12 @@ async function preview({ slot, doc, selection }) {
   try {
     const edit = plan(doc, whole ? 0 : selection.from, whole ? doc.content.size : selection.to);
     if (!edit.source.trim()) return true;
-    status(slot, 'Переформулирую…');
-    const result = await request(edit.source, false);
+    status(slot, mode === 'prompt' ? 'Готовлю промпт…' : 'Переформулирую…');
+    const result = await request(edit.source, false, mode, edit.parts);
     ensureCurrent(slot, doc, revision, () => true, 'Черновик изменился. Ваша правка сохранена.');
     if (!result.bypass) {
-      const tr = edit.replacement(slot.view.state.tr, result.text);
+      const tr = edit.replacement(slot.view.state.tr,
+        edit.parts && result.mode === 'prompt' ? result.parts : result.text);
       if (tr.docChanged) slot.view.dispatch(tr);
       if (whole) slot.cleaned = slot.view.state.doc;
     }
@@ -208,7 +242,7 @@ export async function prepare(controller, options, stillHere) {
     const source = edit ? edit.source : raw;
     if (!source.trim()) return options;
     status(slot, 'Переформулирую…');
-    const answer = await request(source, true);
+    const answer = await request(source, true, undefined, edit?.parts);
     ensureCurrent(slot, live, revision, stillHere, 'Черновик изменился. Отправка отменена.');
     status(slot, '');
     if (answer.bypass || answer.text === source) return options;
@@ -218,13 +252,15 @@ export async function prepare(controller, options, stillHere) {
     }
     if (frozen) {
       const state = view.state.constructor.create({ schema: doc.type.schema, doc });
-      const updated = edit.replacement(state.tr, answer.text).doc;
+      const updated = edit.replacement(state.tr,
+        edit.parts && answer.mode === 'prompt' ? answer.parts : answer.text).doc;
       const format = options.submittedDocumentFormat;
       return { ...options, submittedDocument: updated,
         promptRawOverride: controller.getText(updated, { format }),
         persistedPromptRawOverride: controller.getPersistedText(updated, { format }) };
     }
-    const tr = edit.replacement(view.state.tr, answer.text);
+    const tr = edit.replacement(view.state.tr,
+      edit.parts && answer.mode === 'prompt' ? answer.parts : answer.text);
     if (tr.docChanged) view.dispatch(tr);
     slot.cleaned = view.state.doc;
     return options;

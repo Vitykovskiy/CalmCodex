@@ -52,9 +52,10 @@ struct ProtectedDraft {
 
     var isSingleLiteral: Bool { literals.count == 1 && masked == "\(prefix)1⟧" }
 
-    func restore(_ candidate: String) throws -> String {
+    func restore(_ candidate: String, allowEmpty: Bool = false) throws -> String {
         var text = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
+        if text.isEmpty && literals.isEmpty {
+            if allowEmpty { return "" }
             throw DraftError("Уточните, что случилось или что нужно сделать. Выделенный текст сохранён.")
         }
         // Validate before replacement. The random-looking text inside a literal is user data too.
@@ -62,6 +63,28 @@ struct ProtectedDraft {
         guard tokens.allSatisfy({ text.components(separatedBy: $0).count == 2 }),
               text.components(separatedBy: prefix).count == tokens.count + 1 else {
             throw DraftError("Luna изменила буквальный фрагмент. Выделенный текст сохранён.")
+        }
+        var cursor = text.startIndex
+        for token in tokens {
+            guard let range = text.range(of: token, range: cursor..<text.endIndex) else {
+                throw DraftError("Luna изменила порядок буквальных фрагментов. Выделенный текст сохранён.")
+            }
+            cursor = range.upperBound
+        }
+        let tokenSet = Set(tokens)
+        let standaloneLines = masked.components(separatedBy: .newlines).filter {
+            tokenSet.contains($0.trimmingCharacters(in: .whitespaces))
+        }
+        let outputLines = text.components(separatedBy: .newlines)
+        for sourceLine in standaloneLines {
+            let token = sourceLine.trimmingCharacters(in: .whitespaces)
+            guard let outputLine = outputLines.first(where: {
+                $0.trimmingCharacters(in: .whitespaces) == token
+            }) else {
+                throw DraftError("Luna изменила строки буквального фрагмента. Выделенный текст сохранён.")
+            }
+            // Restore horizontal whitespace ourselves: model-added indentation can change Markdown.
+            text = text.replacingOccurrences(of: outputLine, with: sourceLine)
         }
         for (token, literal) in zip(tokens, literals) {
             text = text.replacingOccurrences(of: token, with: literal)
