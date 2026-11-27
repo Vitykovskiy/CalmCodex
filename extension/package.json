@@ -2,7 +2,7 @@
   "name": "calmcodex",
   "displayName": "CalmCodex",
   "publisher": "local-calmcodex",
-  "description": "Спокойная формулировка и подготовка промпта при отправке в Codex.",
+  "description": "Превращает диктовку и эмоциональные замечания в ясные задачи для Codex.",
   "version": "2.2.0",
   "engines": {
     "vscode": "^1.96.2"
