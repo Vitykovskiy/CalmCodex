@@ -24,7 +24,7 @@ function request(text, auto, mode, parts) {
         reject(new Error('Не удалось проверить режим обработки. Черновик сохранён.'));
       } else if (parts && msg.mode === 'prompt') {
         if (msg.text !== undefined || !Array.isArray(msg.parts) || msg.parts.length !== parts.length ||
-            !msg.parts.every(part => typeof part === 'string' && part.trim())) {
+            !msg.parts.every(part => typeof part === 'string') || !msg.parts.some(part => part.trim())) {
           reject(new Error('Luna изменила границы фрагментов. Черновик сохранён.'));
         } else resolve(msg);
       } else if (typeof msg.text === 'string') resolve(msg);
@@ -113,13 +113,25 @@ document.addEventListener('contextmenu', event => {
 
 function plan(doc, from, to) {
   const runs = [];
+  const regionStarts = [];
+  let protectedBoundary = false;
   doc.nodesBetween(from, to, (node, pos, parent) => {
-    if (node.type.spec.code || node.marks.some(mark => mark.type.spec.code || mark.type.name === 'code')) return false;
-    if (!node.isText) return;
+    if (!node.isText) {
+      if (node.type.spec.code || (node.isAtom && !/^(?:hard_?break|hardBreak)$/.test(node.type.name))) {
+        protectedBoundary = true;
+        return false;
+      }
+      return;
+    }
+    if (node.marks.some(mark => mark.type.spec.code || mark.type.name === 'code')) return false;
     const start = Math.max(from, pos);
     const end = Math.min(to, pos + node.nodeSize);
     const text = node.text.slice(start - pos, end - pos);
-    if (text.trim()) runs.push({ start, end, text, marks: node.marks, parent });
+    if (!text.trim()) return;
+    // Inline formatting divides editor ranges, but the model still needs the whole phrase.
+    if (protectedBoundary || runs.at(-1)?.parent !== parent) regionStarts.push(runs.length);
+    protectedBoundary = false;
+    runs.push({ start, end, text, marks: node.marks, parent });
   });
   // Each immutable boundary protects nodes and marks such as file mentions, links, and paragraph breaks.
   const id = crypto.randomUUID().slice(0, 12);
@@ -127,31 +139,37 @@ function plan(doc, from, to) {
     const marker = String.fromCharCode(96) + 'CC-' + id + '-' + index + String.fromCharCode(96);
     return run.parent === runs[index].parent ? marker : '\n'+marker+'\n';
   });
-  const source = runs.map((run,index)=>(separators[index - 1] || '') + run.text).join('');
-  function replacement(tr, answer) {
-    const segments = Array.isArray(answer) ? answer : [];
-    if (Array.isArray(answer)) {
-      if (answer.length !== runs.length || !answer.every(part => typeof part === 'string' && part.trim())) {
-        throw new Error('Luna изменила границы фрагментов. Черновик сохранён.');
+  function encode(start, end) {
+    return runs.slice(start, end).map((run, index) =>
+      (index ? separators[start + index - 1] : '') + run.text).join('');
+  }
+  const source = encode(0, runs.length);
+  const regions = regionStarts.map((start, index) => [start, regionStarts[index + 1] ?? runs.length]);
+  const parts = regions.length > 1 ? regions.map(([start, end]) => encode(start, end)) : undefined;
+  function decode(answer, start, end) {
+    const segments = [];
+    let remaining = answer;
+    for (const separator of separators.slice(start, end - 1)) {
+      const marker = separator.trim();
+      const at = remaining.indexOf(marker);
+      if (at === -1 || remaining.indexOf(marker, at + marker.length) !== -1) {
+        throw new Error('Luna изменила границы форматирования. Черновик сохранён.');
       }
-    } else {
-      let remaining = answer;
-      for (const separator of separators) {
-        const marker = separator.trim();
-        const at = remaining.indexOf(marker);
-        if (at === -1 || remaining.indexOf(marker, at+marker.length) !== -1) {
-          throw new Error('Luna изменила границы форматирования. Черновик сохранён.');
-        }
-        let before = remaining.slice(0, at);
-        remaining = remaining.slice(at + marker.length);
-        if (separator.startsWith('\n')) {
-          before = before.replace(/\r?\n$/, '');
-          remaining = remaining.replace(/^\r?\n/, '');
-        }
-        segments.push(before);
+      let before = remaining.slice(0, at);
+      remaining = remaining.slice(at + marker.length);
+      if (separator.startsWith('\n')) {
+        before = before.replace(/\r?\n$/, '');
+        remaining = remaining.replace(/^\r?\n/, '');
       }
-      segments.push(remaining);
+      segments.push(before);
     }
+    segments.push(remaining);
+    return segments;
+  }
+  function replacement(tr, answer) {
+    const segments = Array.isArray(answer)
+      ? regions.flatMap(([start, end], index) => decode(answer[index], start, end))
+      : decode(answer, 0, runs.length);
     const schema = doc.type.schema;
     const hardBreak = schema.nodes.hard_break || schema.nodes.hardBreak || schema.nodes.hardbreak;
     for (let i = runs.length - 1; i >= 0; --i) {
@@ -166,7 +184,7 @@ function plan(doc, from, to) {
     }
     return tr;
   }
-  return { source, parts: runs.length > 1 ? runs.map(run => run.text) : undefined, replacement };
+  return { source, parts, replacement };
 }
 
 function ensureCurrent(slot, doc, revision, stillHere, action) {

@@ -22,11 +22,12 @@ enum ProcessingMode: String {
         self = mode
     }
 
-    static func fromCommandLine(_ arguments: [String]) throws -> Self {
-        if arguments == ["--stdin"] { return .rewrite }
+    static func fromCommandLine(_ arguments: [String]) throws -> (mode: Self, allowEmpty: Bool) {
+        if arguments == ["--stdin"] { return (.rewrite, false) }
+        if arguments == ["--stdin", "--mode", "prompt", "--allow-empty"] { return (.prompt, true) }
         guard arguments.count == 3, arguments[0] == "--stdin", arguments[1] == "--mode" else {
-            throw DraftError("Использование: CalmCodex --stdin [--mode rewrite|prompt].")
+            throw DraftError("Использование: CalmCodex --stdin [--mode rewrite|prompt [--allow-empty для prompt]].")
         }
-        return try Self(argument: arguments[2])
+        return (try Self(argument: arguments[2]), false)
     }
 }

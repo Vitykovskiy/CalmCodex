@@ -11,6 +11,13 @@ struct DraftTests {
         precondition(draft.masked == "Блин, сохрани ⟦K1⟧, ⟦K2⟧ и ⟦K3⟧.\n⟦K4⟧")
         let restored = try draft.restore("Сохрани ⟦K1⟧, ⟦K2⟧ и ⟦K3⟧.\n⟦K4⟧")
         precondition(restored == raw.replacingOccurrences(of: "Блин, сохрани", with: "Сохрани"))
+        let noise = try ProtectedDraft("Блин!")
+        let removed = try noise.restore(" \n", allowEmpty: true)
+        precondition(removed.isEmpty)
+        do {
+            _ = try draft.restore("", allowEmpty: true)
+            fatalError("Dropped protected fragments from an empty region")
+        } catch is DraftError {}
 
         for invalid in [
             "", "⟦K1⟧", draft.masked + "⟦K1⟧", draft.masked + "⟦K5⟧",

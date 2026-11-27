@@ -3,7 +3,7 @@
   "displayName": "CalmCodex",
   "publisher": "local-calmcodex",
   "description": "Спокойная формулировка и подготовка промпта при отправке в Codex.",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "engines": {
     "vscode": "^1.96.2"
   },

@@ -6,14 +6,17 @@ struct ProcessingModeTests {
         let implicit = try ProcessingMode.fromCommandLine(["--stdin"])
         let explicit = try ProcessingMode.fromCommandLine(["--stdin", "--mode", "rewrite"])
         let prompt = try ProcessingMode.fromCommandLine(["--stdin", "--mode", "prompt"])
-        precondition(implicit == .rewrite && explicit == .rewrite)
-        precondition(prompt == .prompt)
-        precondition(implicit.resourceName == "editor" && prompt.resourceName == "prompt")
+        let region = try ProcessingMode.fromCommandLine(["--stdin", "--mode", "prompt", "--allow-empty"])
+        precondition(implicit.mode == .rewrite && explicit.mode == .rewrite)
+        precondition(prompt.mode == .prompt && region.mode == .prompt)
+        precondition(!implicit.allowEmpty && !explicit.allowEmpty && !prompt.allowEmpty && region.allowEmpty)
+        precondition(implicit.mode.resourceName == "editor" && prompt.mode.resourceName == "prompt")
 
         for invalid in [
             [], ["--mode", "prompt"], ["--stdin", "--mode"],
             ["--stdin", "--mode", ""], ["--stdin", "--mode", "other"],
             ["--stdin", "--mode", "prompt", "--mode", "rewrite"],
+            ["--stdin", "--mode", "rewrite", "--allow-empty"], ["--stdin", "--allow-empty"],
             ["--stdin", "--other", "prompt"], ["--unknown"]
         ] {
             do {

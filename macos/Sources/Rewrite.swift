@@ -36,7 +36,7 @@ struct Rewriter {
         return URL(fileURLWithPath: path)
     }
 
-    func rewrite(_ original: String, mode: ProcessingMode = .rewrite) throws -> String {
+    func rewrite(_ original: String, mode: ProcessingMode = .rewrite, allowEmpty: Bool = false) throws -> String {
         let draft = try ProtectedDraft(original)
         if draft.isSingleLiteral { return original }
         let binary = try executable()
@@ -102,7 +102,7 @@ struct Rewriter {
               let response = try? JSONDecoder().decode(Reply.self, from: data) else {
             throw DraftError("Codex вернул неполный ответ. Выделенный текст сохранён.")
         }
-        return try draft.restore(response.text)
+        return try draft.restore(response.text, allowEmpty: allowEmpty)
     }
 
     private func failure(details: String, model: String) -> DraftError {

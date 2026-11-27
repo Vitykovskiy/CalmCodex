@@ -186,6 +186,21 @@ test('rewrite mode retains a single call for a structured editor document', asyn
   assert.equal(h.calls[0].options.detached, undefined);
 });
 
+test('a successful empty prompt region is allowed only when another region has content', async () => {
+  const parts = ['Блядь!', 'Поправь чтение.'];
+  const mixed = harness({ mode: 'prompt' }, call => ({
+    text: call.input === parts[0] ? '' : 'Исправь чтение.'
+  }));
+  const reply = await mixed.receive({ parts });
+  assert.deepEqual(Array.from(reply.parts), ['', 'Исправь чтение.']);
+  for (const call of mixed.calls) {
+    assert.deepEqual(call.args, ['--stdin', '--mode', 'prompt', '--allow-empty']);
+  }
+  const empty = harness({ mode: 'prompt' }, { text: '' });
+  assert.match((await empty.receive({ parts })).error, /Уточните/);
+  assert.match((await empty.receive()).error, /не вернула текст/);
+});
+
 test('prompt batches run at most three processes and map out-of-order completions', async () => {
   const h = harness({ mode: 'prompt' }, null);
   const parts = ['one', 'two', 'three', 'four', 'five'];
@@ -236,10 +251,10 @@ test('an aborted signal never starts a process and a late abort never kills a co
   const h = harness({}, { text: 'Готово.' });
   const early = new AbortController();
   early.abort(new Error('Остановлено до запуска.'));
-  await assert.rejects(h.rewrite('/engine', 'Текст', 'prompt', early.signal), /до запуска/);
+  await assert.rejects(h.rewrite('/engine', 'Текст', 'prompt', { signal: early.signal }), /до запуска/);
   assert.equal(h.calls.length, 0);
   const late = new AbortController();
-  assert.equal(await h.rewrite('/engine', 'Текст', 'prompt', late.signal), 'Готово.');
+  assert.equal(await h.rewrite('/engine', 'Текст', 'prompt', { signal: late.signal }), 'Готово.');
   late.abort(new Error('Поздняя отмена.'));
   assert.equal(h.killedGroups.length, 0);
 });

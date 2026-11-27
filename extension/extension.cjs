@@ -4,10 +4,11 @@ const vscode = require('vscode');
 const { spawn } = require('node:child_process');
 const { install } = require('./install-adapter.cjs');
 
-function rewrite(binary, text, mode, signal) {
+function rewrite(binary, text, mode, { signal, allowEmpty = false } = {}) {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(signal.reason); return; }
     const args = mode === 'prompt' ? ['--stdin', '--mode', 'prompt'] : ['--stdin'];
+    if (allowEmpty) args.push('--allow-empty');
     let child;
     // The native engine starts Codex too. Cancel its own process group, not only the wrapper.
     const cancelGroup = () => {
@@ -29,7 +30,7 @@ function rewrite(binary, text, mode, signal) {
     child.on('close', code => {
       cleanup();
       const result = Buffer.concat(output).toString('utf8');
-      if (code === 0 && result.trim()) resolve(result);
+      if (code === 0 && (allowEmpty || result.trim())) resolve(result);
       else reject(new Error(Buffer.concat(diagnostic).toString('utf8').trim() || 'Luna не вернула текст.'));
     });
     child.stdin.end(text, 'utf8');
@@ -47,7 +48,7 @@ async function rewriteParts(binary, parts, mode) {
     while (!controller.signal.aborted) {
       const index = next++;
       if (index >= parts.length) return;
-      try { result[index] = await rewrite(binary, parts[index], mode, controller.signal); }
+      try { result[index] = await rewrite(binary, parts[index], mode, { signal: controller.signal, allowEmpty: true }); }
       catch (error) {
         if (!controller.signal.aborted) controller.abort(error);
         return;
@@ -57,6 +58,9 @@ async function rewriteParts(binary, parts, mode) {
   try {
     await Promise.all(Array.from({ length: Math.min(3, parts.length) }, worker));
     if (controller.signal.aborted) throw controller.signal.reason;
+    if (!result.some(part => part.trim())) {
+      throw new Error('Уточните, что случилось или что нужно сделать. Черновик сохранён.');
+    }
     return result;
   } finally { clearTimeout(timer); }
 }

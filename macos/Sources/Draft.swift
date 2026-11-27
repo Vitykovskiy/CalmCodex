@@ -52,9 +52,10 @@ struct ProtectedDraft {
 
     var isSingleLiteral: Bool { literals.count == 1 && masked == "\(prefix)1⟧" }
 
-    func restore(_ candidate: String) throws -> String {
+    func restore(_ candidate: String, allowEmpty: Bool = false) throws -> String {
         var text = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty else {
+        if text.isEmpty && literals.isEmpty {
+            if allowEmpty { return "" }
             throw DraftError("Уточните, что случилось или что нужно сделать. Выделенный текст сохранён.")
         }
         // Validate before replacement. The random-looking text inside a literal is user data too.

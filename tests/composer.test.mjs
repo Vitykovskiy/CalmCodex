@@ -163,7 +163,7 @@ test('a structured prompt requires a validated mode and a complete region array'
   for (const reply of [
     { mode: undefined, text: 'Слитый текст.' },
     { mode: 'prompt', parts: ['Одна часть.'] },
-    { mode: 'prompt', parts: ['Подпись.', ''] },
+    { mode: 'prompt', parts: ['', ''] },
     { mode: 'prompt', parts: ['Подпись.', 2] }
   ]) {
     replyWith(() => reply);
@@ -171,6 +171,40 @@ test('a structured prompt requires a validated mode and a complete region array'
     assert.equal(await prepare(controller, {}, () => true), null);
     assert.equal(controller.view.state.doc, original);
   }
+});
+
+test('an empty prompt region removes noise and allows the remaining task to submit', async () => {
+  replyWith((raw, message) => {
+    assert.deepEqual(message.parts, ['Блядь!', 'Поправь чтение.']);
+    return { mode: 'prompt', parts: ['', 'Исправь чтение.'] };
+  });
+  const controller = editor(doc(paragraph(text('Блядь!')), paragraph(text('Поправь чтение.'))));
+  assert.deepEqual(await prepare(controller, {}, () => true), {});
+  assert.equal(controller.view.state.doc.child(0).textContent, '');
+  assert.equal(controller.view.state.doc.child(1).textContent, 'Исправь чтение.');
+});
+
+test('formatting boundaries keep the negated verb in the same prompt region', async () => {
+  const bold = schema.marks.strong.create();
+  const image = schema.nodes.image.create({ src: 'file:///test/example.png' });
+  const original = doc(paragraph(
+    text('Блин, ни в коем случае не '), text('откатывай', [bold]), text('. Вот пример:'), image,
+    text('Только объясни причину сбоя.')
+  ));
+  replyWith((raw, message) => {
+    assert.equal(message.parts.length, 2);
+    assert.match(message.parts[0], /не `CC-[^`]+`откатывай`CC-[^`]+`\. Вот пример:$/u);
+    assert.equal(message.parts[1], 'Только объясни причину сбоя.');
+    return { mode: 'prompt', parts: [
+      message.parts[0].replace('Блин, ни', 'Ни'), message.parts[1]
+    ] };
+  });
+  const controller = editor(original);
+  assert.deepEqual(await prepare(controller, {}, () => true), {});
+  const result = controller.view.state.doc.child(0);
+  assert.equal(result.textContent, 'Ни в коем случае не откатывай. Вот пример:Только объясни причину сбоя.');
+  assert.deepEqual(result.child(1).marks, [bold]);
+  assert.equal(result.child(3), image);
 });
 
 test('one failed prompt region leaves all editor ranges unchanged', async () => {
