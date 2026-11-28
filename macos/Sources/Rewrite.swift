@@ -36,15 +36,19 @@ struct Rewriter {
         return URL(fileURLWithPath: path)
     }
 
-    func rewrite(_ original: String, mode: ProcessingMode = .rewrite, allowEmpty: Bool = false) throws -> String {
+    func rewrite(_ original: String, mode: ProcessingMode = .rewrite, allowEmpty: Bool = false,
+                 context: RewriteContext? = nil, modelOverride: String? = nil,
+                 reasoningOverride: ReasoningEffort? = nil, ultracaveOverride: Bool? = nil) throws -> String {
         let draft = try ProtectedDraft(original)
         if draft.isSingleLiteral { return original }
+        let settings = try ModelSettings(modelOverride: modelOverride, reasoningOverride: reasoningOverride,
+                                         ultracaveOverride: ultracaveOverride, defaults: defaults)
         let binary = try executable()
         guard let instructions = Bundle.main.url(forResource: mode.resourceName, withExtension: "txt"),
               let schema = Bundle.main.url(forResource: "response", withExtension: "json") else {
             throw DraftError("Файлы службы повреждены. Переустановите CalmCodex из архива.")
         }
-        let model = defaults.string(forKey: "model") ?? "gpt-6-luna"
+        let model = settings.model
         let temp = files.temporaryDirectory.appendingPathComponent("CalmCodex-\(UUID().uuidString)")
         try files.createDirectory(at: temp, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         defer { try? files.removeItem(at: temp) }
@@ -52,8 +56,10 @@ struct Rewriter {
         let encoder = JSONEncoder()
         encoder.outputFormatting = .withoutEscapingSlashes
         let instructionPath = String(decoding: try encoder.encode(instructions.path), as: UTF8.self)
-        let payload = String(decoding: try encoder.encode(["draft": draft.masked]), as: UTF8.self)
-        let input = Data((mode.instruction + "\n" + payload).utf8)
+        let request = RewriteRequest(draft: original, context: context)
+        let prepared = try request.prepareModelInput(protectedDraft: draft, ultracave: settings.ultracave)
+        let instructionsForInput = mode.instruction + (context == nil ? "" : "\n" + RewriteRequest.contextInstruction)
+        let input = Data((instructionsForInput + "\n" + prepared.json).utf8)
         let result = temp.appendingPathComponent("result.json")
         let diagnostic = temp.appendingPathComponent("diagnostic.jsonl")
         guard files.createFile(atPath: diagnostic.path, contents: nil) else {
@@ -68,7 +74,7 @@ struct Rewriter {
             "-a", "never", "exec", "--ignore-user-config", "--ignore-rules", "--ephemeral",
             "--skip-git-repo-check", "--sandbox", "read-only", "--model", model,
             "--output-schema", schema.path, "--output-last-message", result.path, "--json",
-            "-c", "model_instructions_file=\(instructionPath)", "-c", "model_reasoning_effort=\"low\"",
+            "-c", "model_instructions_file=\(instructionPath)", "-c", "model_reasoning_effort=\"\(settings.reasoningEffort.rawValue)\"",
             "-c", "project_doc_max_bytes=0", "-c", "skills.include_instructions=false",
             "-c", "include_environment_context=false", "-c", "web_search=\"disabled\"",
             "-c", "include_collaboration_mode_instructions=false", "-c", "include_apps_instructions=false"
@@ -92,7 +98,7 @@ struct Rewriter {
                 kill(process.processIdentifier, SIGKILL)
                 process.waitUntilExit()
             }
-            throw DraftError("Luna не ответила за 65 секунд. Выделенный текст сохранён.")
+            throw DraftError("Модель не ответила за 65 секунд. Выделенный текст сохранён.")
         }
         guard process.terminationStatus == 0 else {
             let details = (try? String(contentsOf: diagnostic, encoding: .utf8)) ?? ""
@@ -102,7 +108,7 @@ struct Rewriter {
               let response = try? JSONDecoder().decode(Reply.self, from: data) else {
             throw DraftError("Codex вернул неполный ответ. Выделенный текст сохранён.")
         }
-        return try draft.restore(response.text, allowEmpty: allowEmpty)
+        return try prepared.restore(response.text, allowEmpty: allowEmpty)
     }
 
     private func failure(details: String, model: String) -> DraftError {

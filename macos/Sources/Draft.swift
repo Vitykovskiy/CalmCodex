@@ -23,7 +23,7 @@ struct ProtectedDraft {
         #"(?<![\w/])(?:https?://|(?:[A-Za-z]:\\)|(?:[.~]{0,2}/)|(?:[\w.@+-]+/))[\w./~:@%?&=#+\\-]*[\w/#-]"#
     ].joined(separator: "|"))
 
-    init(_ raw: String) throws {
+    init(_ raw: String, markerPrefix: String = "⟦K") throws {
         guard let first = raw.firstIndex(where: { !$0.isWhitespace }),
               let last = raw.lastIndex(where: { !$0.isWhitespace }) else {
             throw DraftError("Выделите текст запроса.")
@@ -32,7 +32,7 @@ struct ProtectedDraft {
         leadingSpace = String(raw[..<first])
         trailingSpace = String(raw[raw.index(after: last)...])
         let body = String(raw[first...last])
-        var marker = "⟦K"
+        var marker = markerPrefix
         while body.contains(marker) { marker += "K" }
         prefix = marker
 
@@ -52,6 +52,9 @@ struct ProtectedDraft {
 
     var isSingleLiteral: Bool { literals.count == 1 && masked == "\(prefix)1⟧" }
 
+    // Read-only context keeps its layout, but uses the same literal matcher as the editable draft.
+    var maskedOriginal: String { leadingSpace + masked + trailingSpace }
+
     func restore(_ candidate: String, allowEmpty: Bool = false) throws -> String {
         var text = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty && literals.isEmpty {
@@ -62,12 +65,12 @@ struct ProtectedDraft {
         let tokens = literals.indices.map { "\(prefix)\($0 + 1)⟧" }
         guard tokens.allSatisfy({ text.components(separatedBy: $0).count == 2 }),
               text.components(separatedBy: prefix).count == tokens.count + 1 else {
-            throw DraftError("Luna изменила буквальный фрагмент. Выделенный текст сохранён.")
+            throw DraftError("Модель изменила буквальный фрагмент. Выделенный текст сохранён.")
         }
         var cursor = text.startIndex
         for token in tokens {
             guard let range = text.range(of: token, range: cursor..<text.endIndex) else {
-                throw DraftError("Luna изменила порядок буквальных фрагментов. Выделенный текст сохранён.")
+                throw DraftError("Модель изменила порядок буквальных фрагментов. Выделенный текст сохранён.")
             }
             cursor = range.upperBound
         }
@@ -81,7 +84,7 @@ struct ProtectedDraft {
             guard let outputLine = outputLines.first(where: {
                 $0.trimmingCharacters(in: .whitespaces) == token
             }) else {
-                throw DraftError("Luna изменила строки буквального фрагмента. Выделенный текст сохранён.")
+                throw DraftError("Модель изменила строки буквального фрагмента. Выделенный текст сохранён.")
             }
             // Restore horizontal whitespace ourselves: model-added indentation can change Markdown.
             text = text.replacingOccurrences(of: outputLine, with: sourceLine)

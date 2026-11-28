@@ -71,6 +71,29 @@
           "default": "rewrite",
           "scope": "application",
           "description": "Режим обработки перед отправкой. Команды контекстного меню выбирают свой режим."
+        },
+        "calmCodex.ultracave": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Ultracave: дополнительно сжимать текст в обоих режимах, сохраняя вопросы, предположения, ограничения и буквальные фрагменты."
+        },
+        "calmCodex.model": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "description": "Модель переписчика, например gpt-6.2-sol. Пустое значение использует настройку службы macOS (по умолчанию gpt-6-luna). Модель основного Codex выбирается отдельно."
+        },
+        "calmCodex.reasoningEffort": {
+          "type": "string",
+          "enum": ["", "low", "medium", "high", "xhigh", "max"],
+          "enumDescriptions": [
+            "Использовать настройку службы macOS; по умолчанию medium.",
+            "Низкий", "Средний", "Высокий", "Очень высокий", "Максимальный"
+          ],
+          "default": "",
+          "scope": "application",
+          "description": "Уровень рассуждений переписчика. Более высокий уровень может увеличить задержку и расход лимита."
         }
       }
     }
