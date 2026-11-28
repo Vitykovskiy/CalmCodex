@@ -18,6 +18,13 @@ struct RewriteRequestTests {
         }
     }
 
+    static func markers(in text: String) throws -> [String] {
+        let expression = try NSRegularExpression(pattern: "⟦[^⟧]+⟧")
+        let source = text as NSString
+        return expression.matches(in: text, range: NSRange(location: 0, length: source.length))
+            .map { source.substring(with: $0.range) }
+    }
+
     static func main() throws {
         let plain = " \nПочему 403? Код не меняй.\t"
         let legacy = try RewriteRequest(data: Data(plain.utf8), format: .text)
@@ -33,16 +40,74 @@ struct RewriteRequestTests {
         precondition(decoded.draft == target)
         precondition(decoded.context?.before == before && decoded.context?.after == after)
         let protected = try ProtectedDraft(decoded.draft)
-        let payload = try decoded.modelPayload(maskedDraft: protected.masked, ultracave: true)
-        let modelInput = try JSONDecoder().decode(ModelInput.self, from: Data(payload.utf8))
+        let prepared = try decoded.prepareModelInput(protectedDraft: protected, ultracave: true)
+        let modelInput = try JSONDecoder().decode(ModelInput.self, from: Data(prepared.json.utf8))
         precondition(modelInput.draft == "Я для красоты указал ⟦K1⟧?")
         precondition(modelInput.ultracave)
-        precondition(modelInput.context == source.context)
+        precondition(modelInput.context?.before == before)
+        precondition(modelInput.context?.after == ["Объясни, почему ⟦CA1K1⟧ пуст. Код пока не меняй."])
+        precondition(!prepared.json.contains("etag") && !prepared.json.contains("без новых зависимостей"))
         precondition(!modelInput.draft.contains("etag") && !modelInput.draft.contains("макет"))
-        let restored = try protected.restore("Соблюдай требование ⟦K1⟧.")
+        let restored = try prepared.restore("Соблюдай требование ⟦K1⟧.")
         precondition(restored == " Соблюдай требование «без новых зависимостей».\n")
         // A neighbouring literal cannot silently become an extra target marker.
         rejects { _ = try protected.restore("Соблюдай ⟦K1⟧. Объясни ⟦K2⟧.") }
+        rejects { _ = try prepared.restore("Соблюдай ⟦K1⟧. Объясни ⟦CA1K1⟧.") }
+        rejects { _ = try prepared.restore("⟦CA1K1⟧", allowEmpty: true) }
+
+        // Review canaries must be absent from the full outbound JSON, regardless of target position.
+        let contextCanaries = [
+            "src/fixture-only.swift", "REVIEW_CANARY_QUOTED_4351", "CANARY_INLINE_6230",
+            "CANARY_FENCE_9102", "CANARY_URL_2046"
+        ]
+        let canaryRequest = RewriteRequest(draft: " Объясни «TARGET_CANARY_7103».\n", context: RewriteContext(
+            before: [
+                "Открой src/fixture-only.swift и объясни «REVIEW_CANARY_QUOTED_4351».",
+                "Проверь `CANARY_INLINE_6230()`.\n",
+                " \t", "", "Отдельно опиши результат."
+            ],
+            after: [
+                "Пример:\n```swift\nCANARY_FENCE_9102()\n```\nОбъясни причину.",
+                "Ссылка https://example.invalid/CANARY_URL_2046.",
+                "Сохрани API."
+            ]))
+        let canaryInput = try canaryRequest.prepareModelInput(
+            protectedDraft: ProtectedDraft(canaryRequest.draft), ultracave: false)
+        for canary in contextCanaries + ["TARGET_CANARY_7103"] {
+            precondition(!canaryInput.json.contains(canary), "A protected literal reached the model payload")
+        }
+        let maskedCanaries = try JSONDecoder().decode(ModelInput.self, from: Data(canaryInput.json.utf8))
+        precondition(maskedCanaries.context?.before.count == 5 && maskedCanaries.context?.after.count == 3)
+        precondition(maskedCanaries.context?.before[2] == " \t" && maskedCanaries.context?.before[3] == "")
+        precondition(maskedCanaries.context?.before[4] == "Отдельно опиши результат.")
+        precondition(maskedCanaries.context?.after[2] == "Сохрани API.")
+        precondition(maskedCanaries.context?.before[0].hasPrefix("Открой ") == true)
+        precondition(maskedCanaries.context?.before[1].hasSuffix("\n") == true)
+        precondition(maskedCanaries.context?.after[0].hasPrefix("Пример:\n") == true)
+        precondition(maskedCanaries.context?.after[0].hasSuffix("\nОбъясни причину.") == true)
+        let targetMarkers = try markers(in: maskedCanaries.draft)
+        let contextMarkers = try markers(in: (maskedCanaries.context!.before + maskedCanaries.context!.after).joined(separator: "\n"))
+        precondition(contextMarkers.count == contextCanaries.count)
+        precondition(Set(contextMarkers).count == contextMarkers.count)
+        precondition(Set(contextMarkers).isDisjoint(with: Set(targetMarkers)))
+        for marker in contextMarkers {
+            rejects { _ = try canaryInput.restore("Объясни \(targetMarkers[0]). \(marker)") }
+        }
+        let restoredCanary = try canaryInput.restore("Объясни \(targetMarkers[0]).")
+        precondition(restoredCanary == canaryRequest.draft)
+
+        // User text that resembles a namespace cannot collide with generated context markers.
+        let collisionRequest = RewriteRequest(draft: "Сохрани ⟦CB1K1⟧ и объясни «TARGET_COLLISION».",
+            context: RewriteContext(before: ["Метка ⟦CCB1K1⟧. Открой src/before-canary.swift."],
+                                    after: ["Объясни «AFTER_COLLISION»."]))
+        let collisionInput = try collisionRequest.prepareModelInput(
+            protectedDraft: ProtectedDraft(collisionRequest.draft), ultracave: false)
+        let maskedCollision = try JSONDecoder().decode(ModelInput.self, from: Data(collisionInput.json.utf8))
+        precondition(maskedCollision.context?.before[0] == "Метка ⟦CCB1K1⟧. Открой ⟦CCCB1K1⟧.")
+        precondition(maskedCollision.context?.after[0] == "Объясни ⟦CCCA1K1⟧.")
+        let restoredCollision = try collisionInput.restore(maskedCollision.draft)
+        precondition(restoredCollision == collisionRequest.draft)
+        rejects { _ = try collisionInput.restore(maskedCollision.draft + " ⟦CCCA1K1⟧") }
 
         let noContext = try RewriteRequest(data: Data(#"{"draft":"Настоящий вопрос?"}"#.utf8), format: .json)
         precondition(noContext.context == nil)
@@ -51,10 +116,11 @@ struct RewriteRequestTests {
             let untrusted = "{\"draft\":\"Настоящий вопрос?\",\"ultracave\":\(!enabled)}"
             let envelope = try RewriteRequest(data: Data(untrusted.utf8), format: .json)
             for request in [envelope, legacy] {
-                let output = try request.modelPayload(maskedDraft: request.draft, ultracave: enabled)
-                let configuredInput = try JSONDecoder().decode(ModelInput.self, from: Data(output.utf8))
+                let protectedInput = try ProtectedDraft(request.draft)
+                let output = try request.prepareModelInput(protectedDraft: protectedInput, ultracave: enabled)
+                let configuredInput = try JSONDecoder().decode(ModelInput.self, from: Data(output.json.utf8))
                 precondition(configuredInput.ultracave == enabled)
-                precondition(configuredInput.draft == request.draft && configuredInput.context == nil)
+                precondition(configuredInput.draft == protectedInput.masked && configuredInput.context == nil)
             }
         }
         for invalid in [

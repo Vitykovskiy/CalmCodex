@@ -57,9 +57,9 @@ struct Rewriter {
         encoder.outputFormatting = .withoutEscapingSlashes
         let instructionPath = String(decoding: try encoder.encode(instructions.path), as: UTF8.self)
         let request = RewriteRequest(draft: original, context: context)
-        let payload = try request.modelPayload(maskedDraft: draft.masked, ultracave: settings.ultracave)
+        let prepared = try request.prepareModelInput(protectedDraft: draft, ultracave: settings.ultracave)
         let instructionsForInput = mode.instruction + (context == nil ? "" : "\n" + RewriteRequest.contextInstruction)
-        let input = Data((instructionsForInput + "\n" + payload).utf8)
+        let input = Data((instructionsForInput + "\n" + prepared.json).utf8)
         let result = temp.appendingPathComponent("result.json")
         let diagnostic = temp.appendingPathComponent("diagnostic.jsonl")
         guard files.createFile(atPath: diagnostic.path, contents: nil) else {
@@ -108,7 +108,7 @@ struct Rewriter {
               let response = try? JSONDecoder().decode(Reply.self, from: data) else {
             throw DraftError("Codex вернул неполный ответ. Выделенный текст сохранён.")
         }
-        return try draft.restore(response.text, allowEmpty: allowEmpty)
+        return try prepared.restore(response.text, allowEmpty: allowEmpty)
     }
 
     private func failure(details: String, model: String) -> DraftError {

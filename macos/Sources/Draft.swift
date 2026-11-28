@@ -23,7 +23,7 @@ struct ProtectedDraft {
         #"(?<![\w/])(?:https?://|(?:[A-Za-z]:\\)|(?:[.~]{0,2}/)|(?:[\w.@+-]+/))[\w./~:@%?&=#+\\-]*[\w/#-]"#
     ].joined(separator: "|"))
 
-    init(_ raw: String) throws {
+    init(_ raw: String, markerPrefix: String = "⟦K") throws {
         guard let first = raw.firstIndex(where: { !$0.isWhitespace }),
               let last = raw.lastIndex(where: { !$0.isWhitespace }) else {
             throw DraftError("Выделите текст запроса.")
@@ -32,7 +32,7 @@ struct ProtectedDraft {
         leadingSpace = String(raw[..<first])
         trailingSpace = String(raw[raw.index(after: last)...])
         let body = String(raw[first...last])
-        var marker = "⟦K"
+        var marker = markerPrefix
         while body.contains(marker) { marker += "K" }
         prefix = marker
 
@@ -51,6 +51,9 @@ struct ProtectedDraft {
     }
 
     var isSingleLiteral: Bool { literals.count == 1 && masked == "\(prefix)1⟧" }
+
+    // Read-only context keeps its layout, but uses the same literal matcher as the editable draft.
+    var maskedOriginal: String { leadingSpace + masked + trailingSpace }
 
     func restore(_ candidate: String, allowEmpty: Bool = false) throws -> String {
         var text = candidate.trimmingCharacters(in: .whitespacesAndNewlines)

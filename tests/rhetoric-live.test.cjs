@@ -60,6 +60,17 @@ function visualRequest(answer) {
     'The author should not have to imagine the result; this is not an accusation of agent fabrication.');
 }
 
+function contextualVisualRequest(answer) {
+  visualRequest(answer);
+  // This target asks to see the result. The insertion task and unrelated constraints belong
+  // to its neighbours; resolving a noun such as "макет" does not import that task.
+  assert.doesNotMatch(answer,
+    /(?<![\p{L}\p{N}_])(?:добав(?:ь|ьте|ить)|встав(?:ь|ьте|ить)|размест(?:и|ите|ить)|прилож(?:и|ите|ить))(?![\p{L}\p{N}_])/iu,
+    'Do not repeat the neighbouring instruction to add or place a mockup.');
+  assert.doesNotMatch(answer, /AUTH_731|API|код|проверять|объясни|⟦[^⟧]*⟧/iu,
+    'Only the target request belongs in the replacement; neighbouring tasks and markers stay outside.');
+}
+
 function codeUnchanged(answer) {
   const action = '(?:меняй|изменяй|трогай|правь|модифицируй|менять|изменять|трогать|править|модифицировать)';
   const temporal = '(?:\\s+(?:пока|сейчас|вообще|совсем))*';
@@ -154,11 +165,7 @@ const cases = [
       ],
       after: ['Отдельно объясни причину AUTH_731. Сохрани API.']
     },
-    check(answer) {
-      visualRequest(answer);
-      assert.doesNotMatch(answer, /AUTH_731|API|проверять|объясни/iu,
-        'Only the target fragment belongs in the replacement.');
-    }
+    check: contextualVisualRequest
   },
   {
     name: 'following context also disambiguates a rhetorical question',
@@ -167,7 +174,18 @@ const cases = [
       before: [],
       after: ['Вместо макета снова только описание. Добавь фрагмент макета рядом с элементом.']
     },
-    check: visualRequest
+    check: contextualVisualRequest
+  },
+  {
+    name: 'the reviewed contextual fragment does not copy the mockup task or code and API constraints',
+    modes: ['prompt'],
+    ultracave: true,
+    draft: 'Я должен догадаться, как будет выглядеть результат?',
+    context: {
+      before: ['Добавь макет карточки. Код не меняй. Сохрани текущее API.'],
+      after: ['Отдельно объясни, почему изображение исчезло.']
+    },
+    check: contextualVisualRequest
   },
   {
     name: 'a genuine question about creative freedom keeps both alternatives',
@@ -244,6 +262,13 @@ test('semantic checks reject known intent inversions and definite rewrites of te
   visualRequest('Добавь к элементу фрагмент макета, чтобы мне не приходилось додумывать, как это выглядит.');
   visualRequest('Покажи, как это выглядит.');
   visualRequest('Нужно изображение элемента, чтобы было видно, как он выглядит.');
+  contextualVisualRequest('Покажи, как будет выглядеть результат.');
+  contextualVisualRequest('Покажи, как выглядит макет карточки.');
+  for (const answer of [
+    'Добавь макет карточки, чтобы было видно, как будет выглядеть результат. Код не меняй. Сохрани текущее API.',
+    'Добавь туда фрагмент макета, чтобы было видно, как это выглядит.',
+    'Покажи, как это выглядит. Код не меняй.'
+  ]) assert.throws(() => contextualVisualRequest(answer), { name: 'AssertionError' });
   assert.throws(() => codeUnchanged('Код поменяй; не трогай макет.'), { name: 'AssertionError' });
   codeUnchanged('Код пока не меняй.');
   codeUnchanged('Не меняй код.');
@@ -252,6 +277,11 @@ test('semantic checks reject known intent inversions and definite rewrites of te
   importRequest(importAnswer);
   importRequest('## Задача\n' + importAnswer);
   importRequest(importAnswer.replace('Сделай черновик импорта.', '**Черновик импорта**\n'));
+  assert.throws(() => importRequest(importAnswer.replace('Сделай черновик импорта. ', '')
+    + ' Сделай черновик импорта.'), { name: 'AssertionError' });
+  assert.throws(() => importRequest(importAnswer
+    .replace('Карточка может быть как в модалке импорта, так и в реестре шаблонов.',
+      'Карточка будет доступна в модалке импорта и в реестре шаблонов.')), { name: 'AssertionError' });
   assert.throws(() => importRequest(importAnswer
     .replace('Предполагаю реестр с карточками шаблонов.', 'Будет реестр с карточками шаблонов.')
     .replace('Карточка может быть', 'Карточка будет')), { name: 'AssertionError' });

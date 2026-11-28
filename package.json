@@ -5,14 +5,16 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "npm run test:extension && npm run test:composer && npm run test:macos",
+    "test": "npm run test:extension && npm run test:composer && npm run test:context && npm run test:macos",
     "test:extension": "node --test tests/extension.test.cjs",
     "test:composer": "node --test tests/composer.test.mjs",
+    "test:context": "node --test tests/context-pipeline.test.mjs",
     "test:macos": "zsh scripts/test-macos.zsh",
     "test:adapter": "node --test tests/installed-adapter.test.cjs",
     "test:live": "CALMCODEX_TEST_LIVE=1 node --test --test-name-pattern='installed Luna' tests/composer.test.mjs",
     "test:live:prompt": "CALMCODEX_TEST_LIVE=1 node --test tests/prompt-live.test.cjs",
     "test:live:rhetoric": "CALMCODEX_TEST_LIVE=1 node --test tests/rhetoric-live.test.cjs",
+    "test:live:context": "CALMCODEX_TEST_LIVE=1 node --test tests/context-pipeline.test.mjs",
     "build": "zsh scripts/package.zsh"
   },
   "devDependencies": {

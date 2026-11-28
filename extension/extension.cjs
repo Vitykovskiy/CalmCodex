@@ -41,6 +41,29 @@ function rewrite(binary, text, mode, { signal, allowEmpty = false, context, mode
   });
 }
 
+function assertContextStaysOutside(answer, draft, neighbours) {
+  const clauses = (text, separators = /[.!?;,\r\n]+/u) => text.normalize('NFKC').toLowerCase().replaceAll('ё', 'е')
+    .split(separators).map(part => part.match(/[\p{L}\p{N}_]+/gu) || []).filter(words => words.length);
+  // Filler between commas must not split an instruction that already belongs to draft.
+  const own = clauses(draft, /[.!?;\r\n]+/u);
+  const returned = clauses(answer);
+  const sameClause = (words, phrase) => words.length === phrase.length &&
+    phrase.every((word, index) => words[index] === word);
+  // Catch literal imports of complete neighbouring clauses. This is not a semantic judge:
+  // paraphrases still need model evaluation. Never silently delete a suspected instruction.
+  for (const neighbour of neighbours) {
+    for (const phrase of clauses(neighbour)) {
+      if (phrase.length < 2) continue;
+      // Reordering words or removing filler in an instruction already present in draft is legitimate.
+      if (own.some(words => phrase.every(word => words.includes(word)))) continue;
+      // An embedded noun label may legitimately resolve a reference; reject complete copied clauses only.
+      if (returned.some(words => sameClause(words, phrase))) {
+        throw new Error('Модель перенесла текст из соседнего блока. Черновик сохранён.');
+      }
+    }
+  }
+}
+
 async function rewriteParts(binary, parts, mode, options) {
   const controller = new AbortController();
   const timer = setTimeout(() => {
@@ -53,10 +76,13 @@ async function rewriteParts(binary, parts, mode, options) {
       const index = next++;
       if (index >= parts.length) return;
       try {
-        result[index] = await rewrite(binary, parts[index], mode, {
+        const before = parts.slice(0, index), after = parts.slice(index + 1);
+        const answer = await rewrite(binary, parts[index], mode, {
           ...options, signal: controller.signal, allowEmpty: true,
-          context: { before: parts.slice(0, index), after: parts.slice(index + 1) }
+          context: { before, after }
         });
+        assertContextStaysOutside(answer, parts[index], before.concat(after));
+        result[index] = answer;
       }
       catch (error) {
         if (!controller.signal.aborted) controller.abort(error);

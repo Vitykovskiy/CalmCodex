@@ -243,6 +243,61 @@ test('the rhetorical mockup complaint keeps earlier context and later constraint
   }
 });
 
+test('a contextual answer cannot import complete neighbouring instructions', async () => {
+  const parts = [
+    'Добавь макет карточки. Код не меняй. Сохрани текущее API.',
+    'Я должен догадаться, как будет выглядеть результат?',
+    'Отдельно объясни, почему изображение исчезло после экспорта.'
+  ];
+  for (const copied of [
+    'Добавь макет карточки, чтобы было видно, как будет выглядеть результат.',
+    'Покажи, как будет выглядеть результат. Код не меняй.',
+    'Покажи, как будет выглядеть результат. СОХРАНИ ТЕКУЩЕЕ api!',
+    'Покажи результат. Отдельно объясни, почему изображение исчезло после экспорта.'
+  ]) {
+    const h = harness({ mode: 'prompt' }, call => ({
+      text: engineInput(call).draft === parts[1] ? copied : engineInput(call).draft
+    }));
+    const reply = await h.receive({ parts });
+    assert.match(reply.error, /соседнего блока/);
+    assert.equal(reply.parts, undefined);
+    assert.equal(reply.text, undefined);
+  }
+});
+
+test('context scope validation allows a target-owned instruction and reference words', async () => {
+  const parts = ['Код не меняй. Добавь макет карточки.', 'Код пока не меняй. Я должен догадаться, как выглядит карточка?'];
+  const h = harness({ mode: 'prompt' }, call => ({ text: engineInput(call).draft === parts[1]
+    ? 'Не меняй код. Покажи, как выглядит карточка.' : engineInput(call).draft }));
+  const reply = await h.receive({ parts });
+  assert.equal(reply.error, undefined);
+  assert.equal(reply.parts[1], 'Не меняй код. Покажи, как выглядит карточка.');
+});
+
+test('removing filler between commas preserves ownership of a target instruction', async () => {
+  const parts = ['Код не меняй. Добавь макет карточки.', 'Код, блин, не меняй. Покажи результат.'];
+  const answer = 'Код не меняй. Покажи результат.';
+  const h = harness({ mode: 'prompt' }, call => ({ text: engineInput(call).draft === parts[1]
+    ? answer : engineInput(call).draft }));
+  const reply = await h.receive({ parts });
+  assert.equal(reply.error, undefined);
+  assert.equal(reply.parts[1], answer);
+});
+
+test('context labels can resolve a reference inside the target without importing an instruction', async () => {
+  const parts = ['Макет карточки.', 'Покажи, как это выглядит.'];
+  for (const answer of [
+    'Покажи, как выглядит макет карточки.',
+    'Макет карточки нужен, чтобы было видно, как это выглядит.'
+  ]) {
+    const h = harness({ mode: 'prompt' }, call => ({ text: engineInput(call).draft === parts[1]
+      ? answer : engineInput(call).draft }));
+    const reply = await h.receive({ parts });
+    assert.equal(reply.error, undefined);
+    assert.equal(reply.parts[1], answer);
+  }
+});
+
 test('rewrite mode retains a single call for a structured editor document', async () => {
   const h = harness({ mode: 'rewrite' });
   const source = 'До\n`CC-boundary`\nПосле';
